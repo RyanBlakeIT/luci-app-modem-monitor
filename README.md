@@ -100,6 +100,7 @@ Maintenance types: `tech`, `isp-call`, `outage`, `modem-reboot`, `router-change`
 
 - **apk (OpenWrt 25.x):** needs apk-tools v3. Run `./build.sh`; optional variables are `APK=/path/to/apk`, `RELEASE=2`, `MAINTAINER="Name <mail>"` and `URL=https://github.com/you/repo`.
 - **OpenWrt SDK / buildroot:** copy this directory into a LuCI feed (for example `feeds/luci/applications/`) and run `make package/luci-app-modem-monitor/compile`. This produces an `.ipk` or `.apk` to match the SDK. The `Makefile` is provided as a starting point and has not been tested in an SDK build.
+- **Releases:** pushing a tag such as `v1.2.0` (matching `VERSION` in `root/usr/bin/modem-monitor`) makes GitHub Actions lint, smoke-test, build the `.apk` and publish the release. Notes come from `.github/release-notes/<tag>.md`, or otherwise from the matching `CHANGELOG.md` section. Every push to `main` also uploads the `.apk` as a build artifact.
 - **Without a modem:** `test/mock_s33.py` emulates the S33 API; see `test/README.md`.
 
 ## Disclaimer

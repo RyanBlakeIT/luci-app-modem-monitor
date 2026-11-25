@@ -1,0 +1,72 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint
+        run: |
+          python3 -m py_compile root/usr/bin/modem-monitor
+          for f in root/etc/init.d/modem-monitor root/etc/uci-defaults/* scripts/* build.sh; do sh -n "$f"; done
+          for f in root/www/luci-static/resources/view/modem-monitor/*.js; do node --check "$f"; done
+          for f in root/usr/share/luci/menu.d/*.json root/usr/share/rpcd/acl.d/*.json; do python3 -m json.tool "$f" >/dev/null; done
+
+      - name: Smoke test against the mock modem
+        run: |
+          python3 test/mock_s33.py 18080 md5 Secret123 &
+          sleep 1
+          printf 'host=127.0.0.1:18080\npassword=Secret123\ndata_dir=/tmp/mm-data\nweb_dir=/tmp/mm-www\nping_targets=127.0.0.1\nping_count=1\n' > /tmp/mm.conf
+          export MODEM_MONITOR_CONF=/tmp/mm.conf
+          python3 root/usr/bin/modem-monitor test
+          python3 root/usr/bin/modem-monitor poll
+          python3 root/usr/bin/modem-monitor poll
+          python3 root/usr/bin/modem-monitor mark "CI entry" --type other
+          python3 root/usr/bin/modem-monitor export
+          test -s /tmp/mm-www/index.html
+
+      - name: Build apk-tools v3
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build libssl-dev zlib1g-dev pkg-config
+          pip install --quiet meson
+          git clone -q --depth 1 --branch v3.0.8 https://github.com/alpinelinux/apk-tools /tmp/apk-tools
+          cd /tmp/apk-tools
+          meson setup build -Ddocs=disabled -Dlua=disabled -Dzstd=disabled -Dtests=disabled -Dhelp=disabled -Dcrypto_backend=openssl
+          ninja -C build
+
+      - name: Build package
+        run: APK=/tmp/apk-tools/build/src/apk MAINTAINER=RyanBlakeIT URL=https://github.com/${{ github.repository }} ./build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-modem-monitor-apk
+          path: out/*.apk
+
+      - name: Publish release (version tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VER="${TAG#v}"
+          SCRIPT_VER=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' root/usr/bin/modem-monitor)
+          [ "$VER" = "$SCRIPT_VER" ] || { echo "tag $TAG does not match VERSION $SCRIPT_VER"; exit 1; }
+          if [ -f ".github/release-notes/$TAG.md" ]; then
+            cp ".github/release-notes/$TAG.md" notes.md
+          else
+            awk -v v="## $VER" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          fi
+          gh release create "$TAG" out/*.apk --title "$TAG" --notes-file notes.md \
+            || gh release upload "$TAG" out/*.apk --clobber
