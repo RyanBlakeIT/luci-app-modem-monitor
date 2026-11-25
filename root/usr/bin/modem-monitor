@@ -23,6 +23,9 @@ Commands:
                          one-page printable summary for a complaint (default: last 30 days);
                          disruption from planned work is left out unless --all
   modem-monitor alert-test   send a test notification to every configured alert channel
+  modem-monitor credit [--month YYYY-MM] [--json]   outage totals and a credit-request letter
+  modem-monitor backup   copy the data off the router now (see backup_dest)
+  modem-monitor speedtest [--background] [--json]   run a speed test now
   modem-monitor digest [--day YYYY-MM-DD] [--send]   the daily summary (default: yesterday)
   modem-monitor compress gzip monthly data files older than last month (also done daily)
   modem-monitor export   bundle all data + diagnostics into one .zip
@@ -51,7 +54,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -82,7 +85,23 @@ DEFAULTS = {
     "daily_digest": "0",        # morning summary of yesterday via the alert channels
     "digest_hour": "8",
     "overview_tile": "1",       # tile on Status > Overview
-    "alert_dropouts": "3",      # short dropouts in one sample before alerting   # gzip monthly files older than last month
+    "alert_dropouts": "3",      # short dropouts in one sample before alerting
+    "credit_enabled": "1",      # monthly outage totals + credit-request letter
+    "credit_monthly_price": "", # your monthly bill, for the credit estimate
+    "credit_name": "",
+    "credit_account": "",
+    "credit_address": "",
+    "backup_enabled": "0",      # nightly copy of the data off the router
+    "backup_dest": "",          # /mnt/share/modem-monitor or user@host:/path
+    "backup_ssh_key": "/root/.ssh/id_dropbear",
+    "backup_hour": "3",
+    "speedtest_enabled": "0",   # daily speed test (uses data!)
+    "speedtest_hour": "3",
+    "speedtest_url": "https://speed.cloudflare.com",
+    "speedtest_seconds": "10",
+    "speedtest_max_mb": "250",  # per direction
+    "plan_down": "",            # Mb/s you pay for (optional)
+    "plan_up": "",   # gzip monthly files older than last month
     "modem_type": "auto",  # auto, s33 (HNAP: S33/S34), arris_html (SB8200/SB6183/SB6190), netgear
     "wan_device": "",  # empty = auto-detect from the 'wan' interface
     "update_check": "1",  # check GitHub for a newer release once a day
@@ -1896,12 +1915,27 @@ def build_report(cfg):
     data["weather_notes"] = weather_text(weather_effects(summ), unit) if data["weather_on"] else []
     data["traces"] = read_traces(cfg, now - 30 * 86400)
     data["hires_on"] = cfg.get("hires_ping", "0") == "1" or any(fv(r, "hr_sent") for r in summ)
+    sp = read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], now - 90 * 86400)
+    data["speed"] = [[int(r["ts"]), fv(r, "down_mbps"), fv(r, "up_mbps"), fv(r, "idle_ms"), fv(r, "loaded_ms"), r.get("error", "")]
+                     for r in sp]
+    data["plan"] = [fnum(cfg, "plan_down") or None, fnum(cfg, "plan_up") or None]
+    try:
+        data["credit"] = credit_months(cfg) if cfg.get("credit_enabled", "1") == "1" else None
+    except Exception as e:
+        log("credit summary error: %r" % e)
+        data["credit"] = None
+    data["backup"] = load_state(cfg).get("backup_last") if cfg.get("backup_enabled", "0") == "1" else None
     data["title"] = cfg.get("report_title", "").strip()
     data["note"] = cfg.get("report_note", "").strip()
     data.pop("days", None)  # the page builds the daily table itself (see "samples")
 
     # Outages: consecutive failed polls or 100% loss, grouped
     outs = group_outages(summ, interval)
+    for r in summ:
+        if modem_down(r) and not is_outage(r) and "password" not in (r.get("error") or ""):
+            outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
+                         "why": "Modem status page didn't answer, but the internet was working (%s%% ping loss): not an outage"
+                                % (r.get("ping_loss") or 0)})
     for r in summ:
         if r["_reb"]:
             outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0, "why": "Modem rebooted (uptime reset)"})
@@ -2091,6 +2125,8 @@ details summary{cursor:pointer;color:var(--text-secondary);font-size:13px;margin
 <div class="card section"><h2>Maintenance log</h2><div class="sub">Repairs, calls, reboots and router changes, numbered to match the dashed markers on the charts. "Before" and "after" are the 24 hours on each side (median power range, uncorrectables per day, T3/T4 timeouts, upstream power warnings). Add or edit entries on the router's <b>Maintenance Log</b> tab or with <code>modem-monitor mark</code>.</div><div class="scroll"><table id="maint"></table></div></div>
 <div class="card section"><h2 id="daysTitle">Daily summary (last 30 days)</h2><div class="sub">Counts from the modem event log and from this router's polls. Rows with trouble are marked.</div><div class="scroll"><table id="days"></table></div></div>
 <div class="card section"><h2>Incidents</h2><div class="sub">Times the modem couldn't be reached, pings failed completely, or the modem rebooted.</div><div class="scroll"><table id="inc"></table></div></div>
+<div class="card section" id="speedCard" style="display:none"><h2>Speed tests</h2><div class="sub" id="speedNote"></div><div id="speed"></div></div>
+<div class="card section" id="creditCard" style="display:none"><h2>Outages by month</h2><div class="sub">Outages (modem unreachable or no traffic getting through) and modem re-registrations, leaving out planned work: technician visits, reboots you started, and router or wiring changes. Use <b>Credit letter</b> on the router's Cable Modem page for a request letter.</div><div class="scroll"><table id="credit"></table></div><div class="sub" id="backupNote" style="margin-top:6px"></div></div>
 <div class="card section" id="traceCard" style="display:none"><h2>Traceroutes during packet loss</h2><div class="sub">Saved automatically when pings lose packets (at most every 15 minutes). The first hops after this router belong to the ISP; where the stars or high times begin shows where the loss starts.</div><div id="traces"></div></div>
 <div class="card section"><h2>Modem event log</h2><div class="sub">New log entries collected since monitoring began. Login entries from this monitor are hidden.</div><div class="scroll"><table id="ev"></table></div></div>
 <div class="card section"><h2>Raw data (CSV)</h2><div class="sub">Download these and attach them to a complaint or ticket. To get everything in one file, use <b>Download all data</b> on the router's Cable Modem page, or run <code>modem-monitor export</code>.</div><div id="files"></div></div>
@@ -2194,7 +2230,26 @@ function setSince(id){SID=String(id||"");ls("mm-since-id",SID);SINCE=ENT()?start
 function render(){const rg=D.ranges[R];$("#rng").innerHTML=Object.keys(D.ranges).map(k=>"<button aria-pressed="+(k===R)+" data-r="+k+">"+k+"</button>").join("");
  tiles(rg);const g=$("#charts");g.innerHTML="";
  const mk=(D.maint||[]).filter(m=>(m.end||m.ts)>=Math.max(D.now-rg.span,SINCE||0)).length;$("#mk").textContent=mk?"Dashed lines on the charts mark "+mk+" maintenance log entr"+(mk===1?"y":"ies")+" (numbers match the Maintenance log below). Hover a chart for details.":"";
- CH.forEach(c=>g.appendChild(chart(c,rg)));heat(rg)}
+ CH.forEach(c=>g.appendChild(chart(c,rg)));heat(rg);speed(rg);credit()}
+function speed(rg){const S=(D.speed||[]),card=$("#speedCard");if(!S.length){card.style.display="none";return}card.style.display="";
+ const x0=Math.max(D.now-Math.max(rg.span,7*86400),SINCE||0),P=S.filter(r=>r[0]>=x0),pd=D.plan[0],pu=D.plan[1],last=S[S.length-1];
+ $("#speedNote").innerHTML="Measured from this router"+(last?"; latest "+esc(fmtFull(last[0]))+": <b>"+(last[1]??"–")+"</b> Mb/s down, <b>"+(last[2]??"–")+"</b> Mb/s up, latency "+(last[3]??"–")+" ms idle and "+(last[4]??"–")+" ms under load"+(last[5]?" (error: "+esc(last[5])+")":""):"")+". Traffic shaping on the router (SQM) caps these results."+(pd||pu?" Dashed lines: your plan"+(pd?" "+pd+" down":"")+(pu?" / "+pu+" up":"")+".":"");
+ if(!P.length){$("#speed").innerHTML="<div class=empty>No tests in this range.</div>";return}
+ const W=1000,H=200,L=50,Rr=10,Tp=8,B=22,x1=D.now,vals=P.flatMap(r=>[r[1],r[2]]).filter(v=>v!=null).concat([pd,pu].filter(v=>v));
+ const t=nice(0,Math.max(1,...vals),4),hi=t[t.length-1],X=v=>L+(v-x0)/(x1-x0)*(W-L-Rr),Y=v=>Tp+(1-v/hi)*(H-Tp-B);
+ let g="<div class=legend><span><i style='background:var(--s1)'></i>Download</span><span><i style='background:var(--s2)'></i>Upload</span></div><svg viewBox='0 0 "+W+" "+H+"' role=img aria-label='Speed tests'><g class=axis>";
+ t.forEach(v=>{g+="<line class=gl x1="+L+" x2="+(W-Rr)+" y1="+Y(v)+" y2="+Y(v)+" /><text x="+(L-6)+" y="+(Y(v)+4)+" text-anchor=end>"+v+"</text>"});
+ for(let i=0;i<=4;i++){const tt=x0+(x1-x0)*i/4;g+="<text x="+X(tt)+" y="+(H-4)+" text-anchor="+(i?i==4?"end":"middle":"start")+">"+esc(fmtT(tt,x1-x0))+"</text>"}g+="</g>";
+ [[pd,"var(--s1)"],[pu,"var(--s2)"]].forEach(a=>{if(a[0])g+="<line x1="+L+" x2="+(W-Rr)+" y1="+Y(a[0])+" y2="+Y(a[0])+" stroke='"+a[1]+"' stroke-opacity=.6 stroke-dasharray='5 4'/>"});
+ [[1,"var(--s1)"],[2,"var(--s2)"]].forEach(a=>{const pts=P.filter(r=>r[a[0]]!=null);if(pts.length>1)g+="<path d='"+pts.map((r,i)=>(i?"L":"M")+X(r[0]).toFixed(1)+","+Y(r[a[0]]).toFixed(1)).join("")+"' fill=none stroke='"+a[1]+"' stroke-width=2 stroke-linejoin=round />";
+  pts.forEach(r=>{g+="<circle cx="+X(r[0]).toFixed(1)+" cy="+Y(r[a[0]]).toFixed(1)+" r=4 fill='"+a[1]+"' stroke='var(--surface-1)' stroke-width=2><title>"+esc(fmtFull(r[0]))+": "+r[1]+" down / "+r[2]+" up Mb/s, "+(r[3]??"–")+" ms idle, "+(r[4]??"–")+" ms loaded</title></circle>"})});
+ $("#speed").innerHTML=g+"</svg>"}
+function credit(){const C=D.credit,card=$("#creditCard");if(!C||!C.length){card.style.display="none";return}card.style.display="";
+ const pr=C.some(m=>m.price);
+ $("#credit").innerHTML="<tr><th>Month</th><th class=num>Outages</th><th class=num>Minutes</th><th class=num>Re-registrations / reboots</th>"+(D.hires_on?"<th class=num>Short dropouts</th>":"")+"<th class=num>Days affected</th>"+(pr?"<th class=num>Credit (prorated / per day)</th>":"")+"</tr>"+
+  C.map(m=>"<tr><td>"+m.month+"</td><td class=num>"+(m.outages_n??"")+"</td><td class=num>"+m.minutes+(m.logged_n?" <span class=sub title='Outages you logged for times before monitoring; not measured'>(+"+m.logged_n+" logged)</span>":"")+"</td><td class=num>"+m.rereg+"</td>"+(D.hires_on?"<td class=num>"+m.drops+"</td>":"")+"<td class=num>"+m.days.length+"</td>"+(pr?"<td class=num>"+(m.price?"$"+m.prorated.toFixed(2)+" / $"+m.per_day.toFixed(2):"–")+"</td>":"")+"</tr>").join("");
+ const b=D.backup;$("#backupNote").innerHTML=b?(b.ok?"Last off-router backup: "+esc(fmtFull(b.ts))+" ("+esc(b.msg)+")":"<span class=flag>▲ Off-router backup failed "+esc(fmtFull(b.ts))+": "+esc(b.msg)+"</span>"):""}
+
 function heat(rg){const H=rg.heat,el=$("#heat"),lo=Math.max(D.now-rg.span,SINCE||0);
  const ING=(D.ingress||[]).filter(i=>i.ts+86400>lo&&i.ts>=D.now-rg.span-86400);
  const nar=ING.filter(i=>i.kind==="narrow"),wid=ING.filter(i=>i.kind==="wide");
@@ -2982,7 +3037,7 @@ class Prober:
                 self.error = "no ICMP socket available (%s)" % e
                 log("latency probe: " + self.error)
                 return
-        ident = os.getpid() & 0xFFFF
+        ident = (os.getpid() * 31 + id(self)) & 0xFFFF  # distinct per probe
         seq = 0
         pending = {}
         nxt = time.monotonic()
@@ -3160,6 +3215,322 @@ def digest_due(cfg, st, now):
                      json.dumps({"day": day, "text": text}), retain=True)
 
 # --------------------------------------------------------------------------
+# Outage credits: monthly outage totals and a credit-request letter
+# --------------------------------------------------------------------------
+
+def month_bounds(ym):
+    y, m = (int(x) for x in ym.split("-"))
+    lo = int(time.mktime((y, m, 1, 0, 0, 0, 0, 0, -1)))
+    ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
+    hi = int(time.mktime((ny, nm, 1, 0, 0, 0, 0, 0, -1)))
+    return lo, hi
+
+
+def outage_month(cfg, ym, summ_all=None, maint_all=None):
+    """Outages in a month, leaving out planned work: start, minutes, cause."""
+    lo, hi = month_bounds(ym)
+    interval = int(fnum(cfg, "interval"))
+    summ = summ_all if summ_all is not None else mark_reboots(read_csvs(files_since(cfg, "summary", lo - 86400), lo - 86400))
+    summ = [r for r in summ if lo - 86400 <= int(r["ts"]) < hi]
+    allm = maint_all if maint_all is not None else load_maint(cfg)
+    wins = work_windows([m for m in allm if lo - 86400 <= int(m["ts"]) < hi], summ, interval)
+    inw = lambda t: any(w["a"] <= t < w["b"] for w in wins)
+    summ = [r for r in summ if lo <= int(r["ts"]) < hi and not inw(int(r["ts"]))]
+    outs = []
+    for o in group_outages(summ, interval):
+        outs.append({"ts": o["start"], "start": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["start"])),
+                     "mins": round((o["end"] - o["start"]) / 60 + interval / 60), "why": o["why"]})
+    rereg = [r for r in summ if r["_reb"] or r["_rel"]]
+    drops = int(sum(fv(r, "hr_drops") or 0 for r in summ))
+    mins = sum(o["mins"] for o in outs)
+    days = sorted({o["start"][:10] for o in outs} | {time.strftime("%Y-%m-%d", time.localtime(int(r["ts"]))) for r in rereg})
+    price = fnum(cfg, "credit_monthly_price")
+    ndays = (hi - lo) / 86400.0
+    # outages the user logged for times nothing was measured (before monitoring began)
+    alls = [int(r["ts"]) for r in summ]
+    logged = []
+    for m in allm:
+        a, b = int(m["ts"]), max(int(m.get("end_ts") or 0), int(m["ts"]))
+        if m["type"] == "outage" and m["status"] == "confirmed" and lo <= a < hi and \
+                not any(a - interval <= t <= b + interval for t in alls):
+            logged.append({"start": m["time"][:16], "end": (m.get("end_time") or "")[:16], "note": m["note"]})
+    return {"month": ym, "outages": outs, "logged": logged, "minutes": mins, "rereg": len(rereg), "drops": drops,
+            "days": days, "samples": len(summ),
+            "prorated": round(price * mins / (ndays * 1440), 2) if price else None,
+            "per_day": round(price * len(days) / ndays, 2) if price else None, "price": price or None}
+
+
+def credit_months(cfg, n=6):
+    now = time.localtime()
+    out, y, m = [], now.tm_year, now.tm_mon
+    lo = month_bounds("%04d-%02d" % ((y, m - n + 1) if m - n + 1 >= 1 else (y - 1, m - n + 13)))[0]
+    summ = mark_reboots(read_csvs(files_since(cfg, "summary", lo - 86400), lo - 86400))
+    maint = load_maint(cfg)
+    for _ in range(n):
+        ym = "%04d-%02d" % (y, m)
+        r = outage_month(cfg, ym, summ, maint)
+        if r["samples"] or r["logged"]:
+            r["outages_n"] = len(r.pop("outages"))
+            r["logged_n"] = len(r.pop("logged"))
+            out.append(r)
+        y, m = (y - 1, 12) if m == 1 else (y, m - 1)
+    return out
+
+
+def credit_letter(cfg, ym):
+    r = outage_month(cfg, ym)
+    isp = (cfg.get("isp_name") or "").strip() or "your company"
+    name = (cfg.get("credit_name") or "").strip()
+    acct = (cfg.get("credit_account") or "").strip()
+    addr = (cfg.get("credit_address") or "").strip()
+    mname = time.strftime("%B %Y", time.strptime(ym + "-01", "%Y-%m-%d"))
+    data = {"isp": isp, "name": name, "acct": acct, "addr": addr, "month": mname, "r": r,
+            "interval": int(fnum(cfg, "interval")), "today": time.strftime("%B %d, %Y"),
+            "note": (cfg.get("report_note") or "").strip()}
+    out = os.path.join(cfg["web_dir"], "credit.html")
+    os.makedirs(cfg["web_dir"], exist_ok=True)
+    page = CREDIT_HTML.replace("/*__DATA__*/null", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    with open(out + ".tmp", "w") as f:
+        f.write(page)
+    os.chmod(out + ".tmp", 0o644)
+    os.replace(out + ".tmp", out)
+    return out
+
+
+CREDIT_HTML = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Service credit request</title><style>
+body{margin:0;background:#fff;color:#111;font:15px/1.55 Georgia,"Times New Roman",serif}.page{max-width:760px;margin:0 auto;padding:32px}
+.tool{font:13px -apple-system,Segoe UI,Roboto,sans-serif;display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-bottom:16px;color:#555}
+.tool button{font:inherit;padding:6px 14px;border:1px solid #ccc;border-radius:6px;background:#f6f6f4;cursor:pointer}
+#letter{outline:none}#letter:focus{box-shadow:0 0 0 2px #2a78d633;border-radius:4px}
+table{border-collapse:collapse;margin:8px 0 14px;font-size:14px}td,th{padding:3px 12px 3px 0;text-align:left;border-bottom:1px solid #e5e5e5}th{font-weight:600}
+td.n{text-align:right}
+@media print{.tool{display:none}.page{padding:0}@page{margin:20mm}}
+</style></head><body><div class="page">
+<div class="tool"><span>Click the letter to edit it before printing or copying.</span><button id="copy">Copy text</button><button onclick="window.print()">Print / Save as PDF</button></div>
+<div id="letter" contenteditable="true"></div></div><script>
+const D=/*__DATA__*/null,R=D.r,esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pl=(n,w)=>n+" "+w+(n===1?"":"s"),money=v=>"$"+Number(v).toFixed(2);
+let h="";
+if(D.name)h+="<p>"+esc(D.name)+(D.addr?"<br>"+esc(D.addr).replace(/\n/g,"<br>"):"")+"</p>";
+h+="<p>"+esc(D.today)+"</p><p>"+esc(D.isp)+" Customer Service</p>";
+h+="<p><b>Re: Request for a service credit"+(D.acct?", account "+esc(D.acct):"")+" – "+esc(D.month)+"</b></p>";
+h+="<p>Dear "+esc(D.isp)+" Customer Service,</p>";
+const LG=R.logged||[],meas=R.minutes||R.rereg||R.drops;
+if(meas||LG.length){
+ h+="<p>I am requesting a credit on my account for interruptions to my internet service during "+esc(D.month)+".";
+ if(meas){h+=" My router checks the connection and the cable modem every "+Math.round(D.interval/60)+" minutes and logs the results, and it recorded the following:</p><ul>";
+  if(R.outages.length)h+="<li><b>"+pl(R.outages.length,"outage")+"</b>, about <b>"+R.minutes+" minutes</b> in total, when no traffic got through (listed below).</li>";
+  if(R.rereg)h+="<li>"+pl(R.rereg,"time")+" the modem lost its connection to your network and had to re-register or restart.</li>";
+  if(R.drops)h+="<li>"+pl(R.drops,"short dropout")+" of two seconds or more with no response from your network.</li>";
+  h+="</ul>";
+  if(R.days.length)h+="<p>Measured service was affected on "+pl(R.days.length,"day")+": "+R.days.map(d=>d.slice(5)).join(", ")+".</p>";
+  if(R.outages.length)h+="<table><tr><th>Start</th><th class=n>Minutes</th><th>What was recorded</th></tr>"+R.outages.map(o=>"<tr><td>"+o.start+"</td><td class=n>"+o.mins+"</td><td>"+esc(o.why)+"</td></tr>").join("")+"</table>";
+ }else h+="</p>";
+ if(LG.length)h+="<p>"+(meas?"I also noted these interruptions myself, for times before my monitoring was running":"These interruptions happened before my monitoring was running; I noted them myself")+" (from my notes and the modem's own log):</p><ul>"+LG.map(l=>"<li>"+esc(l.start)+(l.end?" to "+esc(l.end.slice(0,10)===l.start.slice(0,10)?l.end.slice(11):l.end):"")+": "+esc(l.note)+"</li>").join("")+"</ul>";
+ h+="<p>Interruptions caused by work I requested or carried out myself (technician visits, reboots, changes to my own equipment) are not included.</p>";
+ if(R.price&&R.per_day>0)h+="<p>My monthly charge is "+money(R.price)+". Prorated for the measured time without service, that is "+money(R.prorated)+"; counting each affected day as a lost day of service, it is "+money(R.per_day)+". I am requesting a credit of <b>"+money(R.per_day)+"</b>"+(LG.length?" plus the days listed above":"")+", or the amount your outage credit policy provides if that is higher.</p>";
+ else h+="<p>Please apply the credit your outage policy provides for these interruptions"+(R.price?" (my monthly charge is "+money(R.price)+")":"")+".</p>";
+ h+="<p>The detailed logs are available on request."+(D.note?" Reference: "+esc(D.note)+".":"")+"</p>";
+}else h+="<p>(No outages were recorded in "+esc(D.month)+", leaving out planned work. There is nothing to claim for this month.)</p>";
+h+="<p>Thank you,</p><p>"+(D.name?esc(D.name):"&nbsp;")+"</p>";
+document.getElementById("letter").innerHTML=h;
+document.getElementById("copy").onclick=()=>{const t=document.getElementById("letter").innerText;(navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(()=>{document.getElementById("copy").textContent="Copied"},()=>{const r=document.createRange();r.selectNodeContents(document.getElementById("letter"));getSelection().removeAllRanges();getSelection().addRange(r);document.execCommand("copy");document.getElementById("copy").textContent="Copied"})};
+</script></body></html>
+"""
+
+
+# --------------------------------------------------------------------------
+# Off-router backup of the data directory
+# --------------------------------------------------------------------------
+
+def backup_files(cfg):
+    d = cfg["data_dir"]
+    pats = ("*.csv", "*.csv.gz", "*.log", "*.log.gz")
+    return sorted({p for pat in pats for p in glob.glob(os.path.join(d, pat))})
+
+
+def run_backup(cfg, st=None):
+    """Mirror the data files (never state.json, which holds the modem session)
+    to a mounted directory or, over SSH, to user@host:/path. Nothing is deleted
+    at the destination, so pruned history survives there."""
+    dest = (cfg.get("backup_dest") or "").strip()
+    if not dest:
+        raise ModemError("no backup destination set")
+    files = backup_files(cfg)
+    t0 = time.time()
+    remote = re.match(r"^([\w.-]+@)?[\w.-]+:(.*)$", dest) and not dest.startswith("/")
+    if not remote:
+        if not os.path.isdir(dest):
+            raise ModemError("%s is not a directory (is the share mounted?)" % dest)
+        if os.path.realpath(dest).startswith(os.path.realpath(cfg["data_dir"])):
+            raise ModemError("the backup destination is inside the data directory")
+        n = 0
+        for p in files:
+            q = os.path.join(dest, os.path.basename(p))
+            try:
+                s1, s2 = os.stat(p), os.stat(q) if os.path.exists(q) else None
+                if s2 and s2.st_size == s1.st_size and int(s2.st_mtime) >= int(s1.st_mtime):
+                    continue
+                shutil.copy2(p, q + ".tmp")
+                os.replace(q + ".tmp", q)
+                n += 1
+            except OSError as e:
+                raise ModemError("copy to %s failed: %s" % (dest, e))
+        msg = "copied %d changed file%s of %d to %s" % (n, "" if n == 1 else "s", len(files), dest)
+    else:
+        key = (cfg.get("backup_ssh_key") or "").strip()
+        sshopt = ["-i", key] if key else []
+        if shutil.which("rsync"):
+            ssh = "ssh -y" if os.path.basename(os.path.realpath(shutil.which("ssh") or "")).startswith("dropbear") \
+                else "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+            cmd = ["rsync", "-a", "--timeout=60", "-e", " ".join([ssh] + sshopt)] + files + [dest.rstrip("/") + "/"]
+        elif shutil.which("scp"):
+            cmd = ["scp", "-q"] + sshopt + files + [dest.rstrip("/") + "/"]
+        else:
+            raise ModemError("no rsync or scp on the router (install rsync or openssh-client)")
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            raise ModemError("backup timed out after 10 minutes")
+        if out.returncode != 0:
+            raise ModemError((out.stderr or out.stdout or "failed").strip()[-300:])
+        msg = "sent %d files to %s with %s" % (len(files), dest, cmd[0])
+    msg += " (%.1f s)" % (time.time() - t0)
+    return msg
+
+
+def backup_due(cfg, st, now):
+    if cfg.get("backup_enabled", "0") != "1":
+        return
+    lt = time.localtime(now)
+    today = time.strftime("%Y-%m-%d", lt)
+    if st.get("backup_day") == today or lt.tm_hour < int(fnum(cfg, "backup_hour")):
+        return
+    if now - st.get("backup_try", 0) < 3600:
+        return
+    st["backup_try"] = int(now)
+    try:
+        msg = run_backup(cfg, st)
+        st["backup_day"], st["backup_last"] = today, {"ts": int(now), "ok": True, "msg": msg}
+        log("backup: " + msg)
+    except ModemError as e:
+        st["backup_last"] = {"ts": int(now), "ok": False, "msg": str(e)}
+        log("backup failed: %s" % e)
+        if cfg.get("alert_enabled") == "1" and alert_targets(cfg):
+            send_alert(cfg, "Modem data backup failed", str(e), 3, "backup")
+
+
+# --------------------------------------------------------------------------
+# Speed tests (optional; uses data)
+# --------------------------------------------------------------------------
+
+SPEED_COLS = ["ts", "time", "down_mbps", "up_mbps", "idle_ms", "loaded_ms", "down_mb", "up_mb", "server", "error"]
+
+
+def _speed_dir(url, seconds, max_bytes, streams, upload=False):
+    import http.client, threading, urllib.parse
+    u = urllib.parse.urlparse(url)
+    total = [0]
+    errs = []
+    lock = threading.Lock()
+    stop_at = time.monotonic() + seconds
+    cafile = next((c for c in CA_FILES if os.path.exists(c)), None)
+    per = max(1, max_bytes // streams)
+
+    def conn():
+        if u.scheme == "https":
+            return http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=15,
+                                               context=ssl.create_default_context(cafile=cafile))
+        return http.client.HTTPConnection(u.hostname, u.port or 80, timeout=15)
+
+    def worker():
+        got = 0
+        try:
+            c = conn()
+            if upload:
+                c.putrequest("POST", (u.path or "/") + "/__up")
+                c.putheader("Content-Type", "application/octet-stream")
+                c.putheader("Content-Length", str(per))
+                c.endheaders()
+                chunk = b"\0" * 65536
+                while got < per and time.monotonic() < stop_at:
+                    n = min(len(chunk), per - got)
+                    c.send(chunk[:n])
+                    got += n
+                    with lock:
+                        total[0] += n
+                if got >= per:
+                    c.getresponse().read()
+            else:
+                c.request("GET", "%s/__down?bytes=%d" % (u.path or "", per))
+                r = c.getresponse()
+                while time.monotonic() < stop_at:
+                    b = r.read(65536)
+                    if not b:
+                        break
+                    with lock:
+                        total[0] += len(b)
+            c.close()
+        except Exception as e:
+            errs.append(str(e))
+
+    t0 = time.monotonic()
+    th = [threading.Thread(target=worker, daemon=True) for _ in range(streams)]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(seconds + 20)
+    el = max(0.001, min(time.monotonic(), stop_at) - t0)
+    if not total[0] and errs:
+        raise ModemError(errs[0][:200])
+    return round(total[0] * 8 / el / 1e6, 1), round(total[0] / 1e6, 1)
+
+
+def speed_test(cfg):
+    url = (cfg.get("speedtest_url") or "https://speed.cloudflare.com").rstrip("/")
+    secs = max(3, int(fnum(cfg, "speedtest_seconds")))
+    cap = max(10, int(fnum(cfg, "speedtest_max_mb"))) * 1000000
+    now = time.time()
+    row = {"ts": int(now), "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), "server": url, "error": ""}
+    tgt = probe_target(cfg)
+    try:
+        p = Prober(tgt).start()
+        time.sleep(4)
+        idle = [r for _, r in p.take() if r is not None]
+        row["idle_ms"] = round(sorted(idle)[len(idle) // 2], 1) if idle else ""
+        row["down_mbps"], row["down_mb"] = _speed_dir(url, secs, cap, 4)
+        dl = [r for _, r in p.take() if r is not None]
+        row["up_mbps"], row["up_mb"] = _speed_dir(url, secs, cap, 4, upload=True)
+        ul = [r for _, r in p.take() if r is not None]
+        p.stop = True
+        loaded = sorted(dl + ul)
+        row["loaded_ms"] = round(loaded[len(loaded) // 2], 1) if loaded else ""
+    except ModemError as e:
+        row["error"] = str(e)
+    except Exception as e:
+        row["error"] = repr(e)[:200]
+    append_csv(os.path.join(cfg["data_dir"], "speedtest.csv"), SPEED_COLS, [row])
+    return row
+
+
+def speed_due(cfg, st, now):
+    if cfg.get("speedtest_enabled", "0") != "1":
+        return
+    lt = time.localtime(now)
+    today = time.strftime("%Y-%m-%d", lt)
+    if "speed_min" not in st:
+        import random
+        st["speed_min"] = random.randint(0, 50)  # spread users across the hour
+    if st.get("speed_day") == today or (lt.tm_hour, lt.tm_min) < (int(fnum(cfg, "speedtest_hour")), st["speed_min"]):
+        return
+    st["speed_day"] = today
+    r = speed_test(cfg)
+    log("speed test: %s down / %s up Mb/s, latency %s ms idle, %s ms loaded%s" % (
+        r.get("down_mbps"), r.get("up_mbps"), r.get("idle_ms"), r.get("loaded_ms"),
+        " (error: %s)" % r["error"] if r.get("error") else ""))
+
+# --------------------------------------------------------------------------
 # Printable complaint summary for a date range
 # --------------------------------------------------------------------------
 
@@ -3178,10 +3549,18 @@ def mark_reboots(summ):
     return summ
 
 
+def is_outage(r):
+    """Service was down: pings failed completely, or the modem didn't answer and
+    pings were failing too (or weren't measured). A modem status page that
+    times out while pings get through is not an outage."""
+    loss = fv(r, "ping_loss")
+    return (loss or 0) >= 100 or (modem_down(r) and (loss is None or loss > 0))
+
+
 def group_outages(summ, interval):
     outs, cur = [], None
     for r in summ:
-        bad = modem_down(r) or (fv(r, "ping_loss") or 0) >= 100
+        bad = is_outage(r)
         t = int(r["ts"])
         if bad:
             why = r.get("error") or "100% packet loss"
@@ -3349,6 +3728,9 @@ def complaint_summary(cfg, d_from, d_to, exclude_work=True):
                 "gw_on": any(fv(r, "gw_loss") is not None for r in summ),
                 "both_loss": sum(1 for r in summ if (fv(r, "gw_loss") or 0) > 0 and (fv(r, "ping_loss") or 0) > 0),
                 "traces": len(read_traces(cfg, lo, 1000)),
+                "speed": [[fv(r, "down_mbps"), fv(r, "up_mbps")] for r in read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], lo)
+                          if int(r["ts"]) < hi and not r.get("error")],
+                "plan": [fnum(cfg, "plan_down") or None, fnum(cfg, "plan_up") or None],
                 "hires_on": any(fv(r, "hr_sent") for r in summ),
                 "drops": int(sum(fv(r, "hr_drops") or 0 for r in summ)),
                 "drop_days": len({r["time"][:10] for r in summ if (fv(r, "hr_drops") or 0) > 0}),
@@ -3431,6 +3813,9 @@ if(T.us_peak!=null&&T.us_peak>L.us_power_max)F.push("Upstream transmit power rea
 if(T.gw_on&&T.loss_polls){if(T.both_loss>=Math.max(1,T.loss_polls/2))F.push("In "+pl(T.both_loss,"sample")+" with packet loss, pings to "+esc(isp)+"\u2019s own gateway (the first hop past the modem) failed too, so the loss starts on the local cable segment, not further out on the internet."+(T.traces?" "+pl(T.traces,"traceroute was","traceroutes were")+" saved during the loss.":""));else if(T.traces)F.push(pl(T.traces,"traceroute was","traceroutes were")+" saved during packet loss.")}
 if(T.hires_on&&T.drops)F.push("One ping per second to "+esc(isp)+"\u2019s gateway recorded <b>"+pl(T.drops,"short dropout")+"</b> (2 or more seconds with no reply, longest "+T.longest+" s) on "+pl(T.drop_days,"day")+". Interruptions this short are missed by ordinary checks but freeze calls, video and online games.");
 if(T.lostch)F.push("In "+pl(T.lostch,"sample")+" the modem was running on only part of its bonded channels (channels it normally holds had dropped), which lowers speed and reliability.");
+if(T.speed&&T.speed.length){const S=T.speed,md=a=>{const v=a.filter(x=>x!=null).sort((x,y)=>x-y);return v.length?v[Math.floor(v.length/2)]:null},pd=T.plan[0],pu=T.plan[1];
+ const low=S.filter(r=>(pd&&r[0]!=null&&r[0]<0.8*pd)||(pu&&r[1]!=null&&r[1]<0.8*pu)).length;
+ F.push(pl(S.length,"speed test")+" from the router: median "+md(S.map(r=>r[0]))+" Mb/s down and "+md(S.map(r=>r[1]))+" Mb/s up"+(pd||pu?"; "+low+" of them below 80% of the plan speed ("+(pd?pd+" down":"")+(pd&&pu?" / ":"")+(pu?pu+" up":"")+" Mb/s)":"")+". The router's own traffic shaping can cap these, so a low result is a lead rather than proof.")}
 (D.weather||[]).forEach(w=>F.push(esc(w)));
 if(T.outages)F.push(pl(T.outages,"outage")+" (modem unreachable or no internet), about "+f(T.down_min)+" minutes in total.");
 if(T.link_on)F.push(T.link_err?"The router recorded "+f(T.link_err)+" Ethernet errors on its connection to the modem.":"The router’s Ethernet connection to the modem recorded <b>no errors</b>, which rules out the home router and the router–modem cable.");
@@ -3961,14 +4346,17 @@ def daemon(cfg):
             poll(cfg)
         except Exception as e:  # never die; procd would respawn anyway
             log("poll error: %r" % e)
-        try:
-            st = load_state(cfg)
-            before = st.get("digest_day")
-            digest_due(cfg, st, time.time())
-            if st.get("digest_day") != before:
-                save_state(cfg, st)
-        except Exception as e:
-            log("digest error: %r" % e)
+        for fn in (digest_due, backup_due, speed_due):
+            try:
+                st = load_state(cfg)
+                before = json.dumps(st, sort_keys=True)
+                fn(cfg, st, time.time())
+                if json.dumps(st, sort_keys=True) != before:
+                    fresh = load_state(cfg)  # keep anything poll() saved meanwhile
+                    fresh.update({k: v for k, v in st.items() if k.startswith(("digest", "backup", "speed"))})
+                    save_state(cfg, fresh)
+            except Exception as e:
+                log("%s error: %r" % (fn.__name__, e))
         if time.time() - last_rep >= rep_every:
             try:
                 build_report(cfg)
@@ -4067,6 +4455,44 @@ def main():
         print(p)
     elif cmd == "test":
         sys.exit(test(cfg, "--raw" in args))
+    elif cmd == "credit":
+        pos, kv, bools = _opts(args[1:], ("--month",))
+        ym = kv.get("month") or time.strftime("%Y-%m")
+        if not re.match(r"^\d{4}-\d{2}$", ym):
+            print("error: --month YYYY-MM")
+            sys.exit(2)
+        if "json" in bools:
+            print(json.dumps(outage_month(cfg, ym)))
+        else:
+            print(credit_letter(cfg, ym))
+    elif cmd == "backup":
+        st = load_state(cfg)
+        try:
+            msg = run_backup(cfg, st)
+            st["backup_last"] = {"ts": int(time.time()), "ok": True, "msg": msg}
+            print(msg)
+        except ModemError as e:
+            st["backup_last"] = {"ts": int(time.time()), "ok": False, "msg": str(e)}
+            print("error: %s" % e)
+            save_state(cfg, st)
+            sys.exit(1)
+        save_state(cfg, st)
+    elif cmd == "speedtest":
+        if "--background" in args:
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "speedtest"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            print("speed test started; results appear on the report in about %d seconds" % (2 * int(fnum(cfg, "speedtest_seconds")) + 10))
+        else:
+            os.makedirs(cfg["data_dir"], exist_ok=True)
+            r = speed_test(cfg)
+            print(json.dumps(r) if "--json" in args else
+                  "download %s Mb/s, upload %s Mb/s, latency %s ms idle / %s ms under load%s" % (
+                      r.get("down_mbps", "?"), r.get("up_mbps", "?"), r.get("idle_ms", "?"), r.get("loaded_ms", "?"),
+                      ("  error: " + r["error"]) if r.get("error") else ""))
+            try:
+                build_report(cfg)
+            except Exception:
+                pass
     elif cmd == "digest":
         pos, kv, bools = _opts(args[1:], ("--day",))
         day, text = day_digest(cfg, kv.get("day"))

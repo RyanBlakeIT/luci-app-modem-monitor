@@ -150,6 +150,32 @@ return view.extend({
 		]);
 	},
 
+	creditLetter: function() {
+		var d = new Date(), pad = function(n) { return (n < 10 ? '0' : '') + n; };
+		/* early in a month, the month that just ended is the likelier one */
+		if (d.getDate() <= 7) d = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+		var month = E('input', { 'type': 'month', 'class': 'cbi-input-text', 'value': d.getFullYear() + '-' + pad(d.getMonth() + 1) });
+		ui.showModal(_('Credit request letter'), [
+			E('p', {}, _('Drafts a letter asking your ISP for a credit for the outages recorded in a month, leaving out planned work. Your name, account number, address and monthly price come from Settings → Outage credits. You can edit the letter before printing or copying it.')),
+			E('label', {}, [ _('Month') + ' ', month ]),
+			E('div', { 'class': 'right', 'style': 'margin-top:12px' }, [
+				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
+				E('button', { 'class': 'btn cbi-button-positive', 'click': function() {
+					if (!month.value) return;
+					return exec([ 'credit', '--month', month.value ]).then(function() {
+						ui.showModal(_('Credit letter ready'), [
+							E('p', {}, _('Opens in a new tab. Click the text to edit it, then use Print / Save as PDF or Copy text.')),
+							E('div', { 'class': 'right' }, [
+								E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Close')), ' ',
+								E('a', { 'class': 'btn cbi-button-positive', 'href': '/modem-monitor/credit.html?t=' + Date.now(), 'target': '_blank', 'rel': 'noopener', 'click': ui.hideModal }, _('Open letter'))
+							])
+						]);
+					}).catch(function(e) { ui.addNotification(null, E('pre', {}, e.message), 'danger'); });
+				} }, _('Draft letter'))
+			])
+		]);
+	},
+
 	rebootModem: function() {
 		var note = E('input', { 'type': 'text', 'class': 'cbi-input-text', 'style': 'width:100%',
 			'placeholder': _('Optional: why (e.g. fresh baseline after tech visit)') });
@@ -279,6 +305,10 @@ return view.extend({
 				'class': 'btn cbi-button',
 				'click': ui.createHandlerFn(this, 'complaintSummary')
 			}, _('Complaint summary')), ' ',
+			E('button', {
+				'class': 'btn cbi-button',
+				'click': ui.createHandlerFn(this, 'creditLetter')
+			}, _('Credit letter')), ' ',
 			E('a', { 'class': 'btn cbi-button', 'href': REPORT, 'target': '_blank' }, _('Open in new tab')), ' ',
 			E('button', {
 				'class': 'btn cbi-button cbi-button-negative', 'style': 'float:right',

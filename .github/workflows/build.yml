@@ -38,6 +38,12 @@ jobs:
           python3 root/usr/bin/modem-monitor summary
           test -s /tmp/mm-www/summary.html
           grep -q '^modem_up 1' /tmp/mm-www/metrics.txt
+          python3 root/usr/bin/modem-monitor credit
+          test -s /tmp/mm-www/credit.html
+          mkdir -p /tmp/mm-bk && printf 'backup_dest=/tmp/mm-bk\n' >> /tmp/mm.conf && python3 root/usr/bin/modem-monitor backup && ls /tmp/mm-bk/*.csv
+          python3 test/mock_speed.py 18300 & sleep 1
+          printf 'speedtest_url=http://127.0.0.1:18300\nspeedtest_seconds=3\nhires_target=127.0.0.1\n' >> /tmp/mm.conf
+          python3 root/usr/bin/modem-monitor speedtest --json | python3 -c "import json,sys; r=json.load(sys.stdin); assert r['down_mbps'] and r['up_mbps'], r"
           for k in sb8200:18101 sb8200login:18102 netgear:18103; do
             n=${k%%:*}; p=${k##*:}
             python3 test/mock_html.py $p $n Secret1 &

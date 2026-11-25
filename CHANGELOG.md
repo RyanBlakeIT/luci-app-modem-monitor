@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.0
+Each of these can be turned on or off under Settings.
+- **Outage credits** (on by default): an **Outages by month** card on the report shows outages, minutes, re-registrations, short dropouts, days affected and an estimated credit (prorated, and per affected day, if you enter your monthly price). The new **Credit letter** button drafts a request letter for a month from your name, account and address under Settings → Outage credits. You can edit the letter before printing or copying it. Planned work is left out, and outages you logged for times before monitoring began are listed as your own notes, not added to the measured total.
+- **Off-router backup** (off by default): a nightly copy of all data files to a mounted folder (NAS/USB) or `user@host:/path` over SSH (rsync, else scp). It only copies changed files, never deletes at the destination and never copies the session state. **Back up now** button, `modem-monitor backup`, failure alerts, and the last result shown on the report.
+- **Speed tests** (off by default): a daily test at a random minute in the chosen hour, against Cloudflare by default or any server with the same endpoints. It uses 4 streams per direction with a time and data limit (10 s / 250 MB), and measures latency idle and under load. Results go to a report chart, with dashed lines for your plan speeds, and the complaint summary notes tests below 80% of the plan. **Run a speed test now** button, `modem-monitor speedtest`.
+- **More accurate outages:** a sample counts as an outage only when pings failed too. A modem status page that times out while the internet works (seen most mornings around 08:47 on the S33) is listed as information, not an outage, in the report, complaint summary and credit letter.
+
 ## 1.5.1
 - New maintenance type **Wiring / attenuation change** (`wiring`) for splitters, pads, cables and connectors. Like tech visits and planned reboots, these count as planned work, so the complaint summary leaves out the disruption they cause.
 - The Maintenance Log tab numbers entries by time, matching the numbers on the report's chart markers. A back-dated entry no longer shows up out of sequence. The stored ID that the `maint-*` commands use is shown on hover.

@@ -25,6 +25,9 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 - **Channel watch:** flags samples where the modem holds fewer bonded channels than it did in the last 24 hours (partial service), with an alert.
 - **Daily summary:** an optional morning notification with yesterday's timeouts, errors, levels, outages and dropouts.
 - **Status → Overview tile:** current levels and today's errors on the router's main status page.
+- **Outage credits:** monthly outage totals on the report (planned work left out) and a credit-request letter for any month, editable before you print or copy it.
+- **Off-router backup (optional):** a nightly copy of the data to a mounted share or to `user@host:/path` over SSH.
+- **Speed tests (optional):** a daily download/upload test with latency while idle and under load, compared with your plan speed.
 - **Download all data:** one `.zip` with every CSV, the report and a diagnostics snapshot. MAC addresses and public IP addresses are masked by default.
 - **Updates:** checks GitHub for a newer release every 6 hours and offers to install it from the Signal Report page. The download is verified against GitHub's published SHA-256 checksum, and nothing is installed without your click.
 - **`latest.json`:** the newest sample, for Zabbix or other monitoring.
@@ -84,6 +87,10 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 | `daily_digest`, `digest_hour` | `0`, `8` | Morning summary of yesterday via the alert channels |
 | `overview_tile` | `1` | Tile on Status → Overview |
 | `alert_dropouts` | `3` | Short dropouts in one sample before alerting |
+| `credit_enabled`, `credit_monthly_price`, `credit_name`, `credit_account`, `credit_address` | `1`, — | Outage-credit tracking and letter details |
+| `backup_enabled`, `backup_dest`, `backup_ssh_key`, `backup_hour` | `0`, —, `/root/.ssh/id_dropbear`, `3` | Nightly backup to a folder or `user@host:/path` |
+| `speedtest_enabled`, `speedtest_hour`, `speedtest_seconds`, `speedtest_max_mb`, `speedtest_url` | `0`, `3`, `10`, `250`, Cloudflare | Daily speed test (uses data) |
+| `plan_down`, `plan_up` | — | Your plan speeds in Mb/s, for comparison |
 | `compress_old` | `1` | gzip monthly files older than last month |
 | `wan_device` | *(auto)* | Modem-facing port; auto = device of the `wan` interface |
 | `modem_route` | `host` | How the router reaches the modem: `host` route, `alias` address, or `off` |
@@ -125,6 +132,9 @@ modem-monitor maint-confirm ID | maint-del ID
 modem-monitor maint-import FILE.csv         # columns: time,end_time,type,note[,source]
 modem-monitor summary [--from YYYY-MM-DD] [--to YYYY-MM-DD]   # printable complaint summary (default: last 30 days)
 modem-monitor alert-test                    # send a test notification to every configured channel
+modem-monitor credit [--month YYYY-MM] [--json]   # credit-request letter / outage totals
+modem-monitor backup                        # copy the data off the router now
+modem-monitor speedtest [--background]      # run a speed test now
 modem-monitor digest [--day YYYY-MM-DD] [--send]   # the daily summary (default: yesterday)
 modem-monitor compress                      # gzip monthly files older than last month (also daily)
 modem-monitor export [--full]               # one .zip; --full keeps MAC/public IP addresses
@@ -137,7 +147,7 @@ Maintenance types: `tech`, `isp-call`, `outage`, `modem-reboot`, `router-change`
 
 ## Data and privacy
 
-- Everything stays on the router. The only outside connections are the pings, a request to the GitHub API every 6 hours for the latest release (if update checks are on), the alert services you configure, Open-Meteo (if a weather location is set, sending only the coordinates) and your MQTT broker. A public ntfy.sh topic can be read by anyone who knows its name, so use a long random one or a protected topic.
+- Everything stays on the router. The only outside connections are the pings, a request to the GitHub API every 6 hours for the latest release (if update checks are on), the alert services you configure, the speed test server (if speed tests are on), your backup destination, Open-Meteo (if a weather location is set, sending only the coordinates) and your MQTT broker. A public ntfy.sh topic can be read by anyone who knows its name, so use a long random one or a protected topic.
 - The modem password is stored in UCI in plain text, as with other OpenWrt credentials.
 - The report and `latest.json` are served by uhttpd at `http://<router>/modem-monitor/` on your LAN.
 - Exports mask MAC addresses and public IP addresses unless you use `--full`.

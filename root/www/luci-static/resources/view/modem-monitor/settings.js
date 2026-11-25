@@ -193,6 +193,95 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
+		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Outage credits'),
+			_('Totals outages per month on the report (leaving out planned work) and drafts a credit-request letter from the Cable Modem page.'));
+
+		o = s.option(form.Flag, 'credit_enabled', _('Track outage credits'));
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'credit_monthly_price', _('Monthly price ($)'), _('Optional. Used to estimate the credit.'));
+		o.datatype = 'ufloat';
+		o.depends('credit_enabled', '1');
+		o = s.option(form.Value, 'credit_name', _('Your name'));
+		o.depends('credit_enabled', '1');
+		o = s.option(form.Value, 'credit_account', _('Account number'));
+		o.depends('credit_enabled', '1');
+		o = s.option(form.TextValue, 'credit_address', _('Service address'));
+		o.rows = 2;
+		o.depends('credit_enabled', '1');
+
+		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Backup'),
+			_('Copies the data files off the router once a night, so a failed SD card or USB drive doesn\'t take your history with it. Nothing is deleted at the destination.'));
+
+		o = s.option(form.Flag, 'backup_enabled', _('Nightly backup'));
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'backup_dest', _('Destination'),
+			_('A mounted folder (for example a NAS share at /mnt/nas/modem-monitor), or <code>user@host:/path</code> over SSH. For SSH, install <code>rsync</code> (or <code>openssh-client</code>) and add this router\'s public key (<code>dropbearkey -y -f /root/.ssh/id_dropbear</code>) to the other machine\'s authorized_keys.'));
+		o.placeholder = '/mnt/nas/modem-monitor';
+		o.depends('backup_enabled', '1');
+
+		o = s.option(form.Value, 'backup_ssh_key', _('SSH key'), _('Only for user@host destinations.'));
+		o.placeholder = '/root/.ssh/id_dropbear';
+		o.depends('backup_enabled', '1');
+
+		o = s.option(form.ListValue, 'backup_hour', _('Back up at'));
+		for (var bh = 0; bh < 24; bh++)
+			o.value(String(bh), '%02d:00'.format(bh));
+		o.default = '3';
+		o.depends('backup_enabled', '1');
+
+		o = s.option(form.Button, '_backup_now', _('Test'));
+		o.inputtitle = _('Back up now');
+		o.inputstyle = 'action';
+		o.depends('backup_enabled', '1');
+		o.onclick = function() {
+			return fs.exec('/usr/bin/modem-monitor', [ 'backup' ]).then(function(res) {
+				ui.addNotification(null, E('p', {}, ((res.stdout || '') + (res.stderr || '')).trim() + ' ' + _('(uses the saved settings)')), res.code === 0 ? 'info' : 'warning');
+			});
+		};
+
+		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Speed tests'),
+			_('Optional daily download and upload test from the router (default server: Cloudflare), with latency measured while idle and under load. Each test uses up to the data limit below in each direction, so mind any data cap. Traffic shaping (SQM) on the router caps the results.'));
+
+		o = s.option(form.Flag, 'speedtest_enabled', _('Daily speed test'));
+		o.rmempty = false;
+
+		o = s.option(form.ListValue, 'speedtest_hour', _('Run at (hour)'), _('A random minute within the hour is used.'));
+		for (var sh = 0; sh < 24; sh++)
+			o.value(String(sh), '%02d:xx'.format(sh));
+		o.default = '3';
+		o.depends('speedtest_enabled', '1');
+
+		o = s.option(form.Value, 'speedtest_seconds', _('Seconds per direction'));
+		o.datatype = 'range(3,30)';
+		o.placeholder = '10';
+		o.depends('speedtest_enabled', '1');
+
+		o = s.option(form.Value, 'speedtest_max_mb', _('Data limit per direction (MB)'));
+		o.datatype = 'range(10,5000)';
+		o.placeholder = '250';
+		o.depends('speedtest_enabled', '1');
+
+		o = s.option(form.Value, 'plan_down', _('Plan download (Mb/s)'), _('Optional. Shown on the chart; the complaint summary counts tests below 80% of it.'));
+		o.datatype = 'ufloat';
+		o = s.option(form.Value, 'plan_up', _('Plan upload (Mb/s)'));
+		o.datatype = 'ufloat';
+
+		o = s.option(form.Value, 'speedtest_url', _('Server'), _('Any server with Cloudflare-style /__down and /__up endpoints.'));
+		o.placeholder = 'https://speed.cloudflare.com';
+		o.depends('speedtest_enabled', '1');
+
+		o = s.option(form.Button, '_speed_now', _('Test'));
+		o.inputtitle = _('Run a speed test now');
+		o.inputstyle = 'action';
+		o.onclick = function() {
+			return fs.exec('/usr/bin/modem-monitor', [ 'speedtest', '--background' ]).then(function(res) {
+				ui.addNotification(null, E('p', {}, ((res.stdout || '') + (res.stderr || '')).trim()), 'info');
+			});
+		};
+
 		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Network path & weather'));
 
 		o = s.option(form.Flag, 'gw_ping', _('Ping the ISP gateway'),
