@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.4
+- **Updates from GitHub:** checks the repository's latest release once a day, and when the Signal Report page opens if the last check is over a day old. When a newer version exists, the page shows a banner with **What's new** and **Install update**.
+- Installing downloads the release `.apk` (or `.ipk` on opkg systems), verifies its size and SHA-256 against the checksum GitHub publishes, and installs it with the package manager in the background while the page shows progress. Nothing is installed without a click.
+- Settings → Updates: turn the daily check on or off, set the repository (for forks), and **Check now**.
+- CLI: `update-check [--json]`, `update-install`, `update-status`.
+- New dependency: `ca-bundle` (certificates for HTTPS; normally already installed).
+
 ## 1.1.3
 - Event log timestamps follow the modem's clock display. After a reboot the S33 can briefly show its log in UTC (startup entries as 1/1/1970 00:00 instead of 31/12/1969 19:00) before it gets its time zone. The monitor now reads `CustomerCurSystemTime` every sample to know which is in effect, and identifies log entries by their real time, so a re-rendered log is no longer stored a second time, hours late.
 - One-time repair of `events.csv`: re-times startup entries and removes UTC copies of entries already stored.

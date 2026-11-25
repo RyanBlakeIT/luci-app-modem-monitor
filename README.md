@@ -16,6 +16,7 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 - **Reboot modem button:** sends the same command as the modem's Configuration page and logs it with the exact time.
 - **Router–modem link:** CRC, alignment and collision counters, link drops and speed changes on the WAN port, so a bad patch cable can be ruled out. NIC receive overruns (`rx_missed`) are tracked separately as a router tuning issue.
 - **Download all data:** one `.zip` with every CSV, the report and a diagnostics snapshot. MAC addresses and public IP addresses are masked by default.
+- **Updates:** checks GitHub for a newer release daily and offers to install it from the Signal Report page. The download is verified against GitHub's published SHA-256 checksum, and nothing is installed without your click.
 - **`latest.json`:** the newest sample, for Zabbix or other monitoring.
 
 ## Requirements
@@ -24,7 +25,7 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 | --- | --- | --- |
 | Modem | Arris SURFboard S33 (hardware 1.0, firmware TB01.03.001.11) | Uses the HNAP JSON API behind the S33 web UI, with HTTPS/HTTP and HMAC-SHA256/MD5 auto-detected. Other Arris/CommScope SURFboard models with the same web UI may work but are untested; please open an issue with `modem-monitor test --raw` output. |
 | OpenWrt | 25.12 (apk) | The `.apk` release targets OpenWrt 25.x. For 24.10 or older (opkg), build an `.ipk` with the SDK and the included `Makefile`. |
-| Packages | `python3`, `luci-base`, `rpcd-mod-file` | `python3` needs about 15–20 MB. |
+| Packages | `python3`, `luci-base`, `rpcd-mod-file`, `ca-bundle` | `python3` needs about 15–20 MB. |
 | Storage | — | About 2–4 MB of CSV per month. Use USB/SSD storage on routers with small flash. |
 
 ## Install
@@ -32,10 +33,10 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 Download the latest `.apk` from [Releases](https://github.com/RyanBlakeIT/luci-app-modem-monitor/releases), then:
 
 ```sh
-scp -O luci-app-modem-monitor-1.1.3-r1.apk root@192.168.1.1:/tmp/
+scp -O luci-app-modem-monitor-1.1.4-r1.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1
 apk update
-apk add --allow-untrusted /tmp/luci-app-modem-monitor-1.1.3-r1.apk
+apk add --allow-untrusted /tmp/luci-app-modem-monitor-1.1.4-r1.apk
 ```
 
 The package is not signed by OpenWrt, so `--allow-untrusted` is needed.
@@ -53,6 +54,8 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 
 | Option | Default | What it does |
 | --- | --- | --- |
+| `update_check` | `1` | Check GitHub for a newer release once a day |
+| `update_repo` | `RyanBlakeIT/luci-app-modem-monitor` | Repository to check (change for forks) |
 | `isp_name` | *(empty)* | Shown in the report title and text; empty = "your ISP" |
 | `report_title` | *(empty)* | Replaces "Cable modem signal report" |
 | `report_note` | *(empty)* | One line under the title, e.g. account / complaint reference |
@@ -85,13 +88,16 @@ modem-monitor maint-edit ID [--type T] [--time ...] [--end ...] [--note ...]
 modem-monitor maint-confirm ID | maint-del ID
 modem-monitor maint-import FILE.csv         # columns: time,end_time,type,note[,source]
 modem-monitor export [--full]               # one .zip; --full keeps MAC/public IP addresses
+modem-monitor update-check [--json]         # is a newer release on GitHub?
+modem-monitor update-install                # download (verified) and install it
+modem-monitor update-status                 # progress of a running install
 ```
 
 Maintenance types: `tech`, `isp-call`, `outage`, `modem-reboot`, `router-change`, `other`.
 
 ## Data and privacy
 
-- Everything stays on the router. Nothing is sent anywhere except the pings.
+- Everything stays on the router. The only outside connections are the pings and, if update checks are on, one daily request to the GitHub API for the latest release.
 - The modem password is stored in UCI in plain text, as with other OpenWrt credentials.
 - The report and `latest.json` are served by uhttpd at `http://<router>/modem-monitor/` on your LAN.
 - Exports mask MAC addresses and public IP addresses unless you use `--full`.

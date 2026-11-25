@@ -16,6 +16,9 @@ Commands:
                          router-change, isp-call, outage, other)
   modem-monitor maint-list [--json] | maint-edit ID [--type --time --end --note]
   modem-monitor maint-del ID | maint-confirm ID | maint-import FILE.csv
+  modem-monitor update-check [--json] [--cached]   is a newer release on GitHub?
+  modem-monitor update-install   download (verified) and install the newer release
+  modem-monitor update-status    progress of a running install (JSON)
   modem-monitor export   bundle all data + diagnostics into one .zip
                          (MAC/public IP addresses masked; --full keeps them)
 
@@ -40,7 +43,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -64,6 +67,8 @@ DEFAULTS = {
     "ds_snr_min": "33",
     "timeout": "15",
     "wan_device": "",  # empty = auto-detect from the 'wan' interface
+    "update_check": "1",  # check GitHub for a newer release once a day
+    "update_repo": "RyanBlakeIT/luci-app-modem-monitor",
     "isp_name": "",      # shown in the report, e.g. "Comcast"; empty = "your ISP"
     "report_title": "",  # custom report title; empty = "Cable modem signal report"
     "report_note": "",   # one line under the title, e.g. account / complaint reference
@@ -1745,6 +1750,153 @@ def maint_cli(cfg, cmd, args):
 
 
 # --------------------------------------------------------------------------
+# Updates from GitHub releases (prompted, never automatic)
+# --------------------------------------------------------------------------
+
+UPDATE_CACHE = "/tmp/modem-monitor-update.json"
+UPDATE_DIR = "/tmp/modem-monitor-update"
+UPDATE_LOG = "/tmp/modem-monitor-update.log"
+CA_FILES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem", "/etc/ssl/certs/ca-bundle.crt")
+
+
+def _vt(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:4])
+
+
+def _https_get(url, timeout=20, accept="application/vnd.github+json"):
+    """HTTPS GET with certificate verification; falls back to OpenWrt's
+    uclient-fetch (wget) if Python can't find a CA bundle."""
+    cafile = next((c for c in CA_FILES if os.path.exists(c)), None)
+    req = urllib.request.Request(url, headers={"User-Agent": "luci-app-modem-monitor/" + VERSION,
+                                               "Accept": accept})
+    try:
+        ctx = ssl.create_default_context(cafile=cafile)
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.read()
+    except (ssl.SSLError, urllib.error.URLError) as e:
+        if isinstance(e, urllib.error.HTTPError):
+            raise
+        try:
+            out = subprocess.run(["wget", "-q", "-T", str(timeout), "-O", "-", url],
+                                 capture_output=True, timeout=timeout * 3)
+        except (OSError, subprocess.SubprocessError):
+            raise e
+        if out.returncode != 0 or not out.stdout:
+            raise
+        return out.stdout
+
+
+def _pkg_tool():
+    if shutil.which("apk"):
+        return "apk"
+    if shutil.which("opkg"):
+        return "opkg"
+    return None
+
+
+def update_check(cfg, force=False, cached=False):
+    now = time.time()
+    try:
+        with open(UPDATE_CACHE) as f:
+            c = json.load(f)
+        if c.get("current") == VERSION and c.get("repo") == cfg.get("update_repo") and not force:
+            if (cached and now - c.get("checked", 0) < 86400) or now - c.get("checked", 0) < 6 * 3600:
+                return c
+    except (OSError, ValueError):
+        pass
+    repo = (cfg.get("update_repo") or "").strip().strip("/")
+    info = {"checked": int(now), "repo": repo, "current": VERSION, "latest": "", "newer": False,
+            "url": "", "asset": None, "notes": "", "error": ""}
+    if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+        info["error"] = "no valid update repository set (owner/name)"
+    else:
+        try:
+            rel = json.loads(_https_get("https://api.github.com/repos/%s/releases/latest" % repo).decode())
+            tag = rel.get("tag_name", "")
+            info.update(latest=tag.lstrip("v"), url=rel.get("html_url", ""),
+                        notes=(rel.get("body") or "")[:6000])
+            ext = ".ipk" if _pkg_tool() == "opkg" else ".apk"
+            for a in rel.get("assets", []):
+                if a.get("name", "").startswith("luci-app-modem-monitor") and a["name"].endswith(ext):
+                    info["asset"] = {"name": a["name"], "url": a.get("browser_download_url", ""),
+                                     "size": a.get("size", 0), "digest": a.get("digest") or ""}
+                    break
+            info["newer"] = _vt(info["latest"]) > _vt(VERSION)
+            if info["newer"] and not info["asset"]:
+                info["error"] = "release %s has no %s file" % (tag, ext)
+        except urllib.error.HTTPError as e:
+            info["error"] = "GitHub answered HTTP %d" % e.code + (" (no releases yet?)" if e.code == 404 else "")
+        except Exception as e:
+            info["error"] = "could not reach GitHub: %s" % (getattr(e, "reason", None) or e)
+    try:
+        tmp = UPDATE_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(info, f)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, UPDATE_CACHE)
+    except OSError:
+        pass
+    if info["newer"]:
+        log("update available: %s (installed %s)" % (info["latest"], VERSION))
+    return info
+
+
+def update_install(cfg):
+    info = update_check(cfg, force=True)
+    if info["error"]:
+        raise ModemError(info["error"])
+    if not info["newer"]:
+        return "Already up to date (%s)." % VERSION
+    tool = _pkg_tool()
+    if not tool:
+        raise ModemError("neither apk nor opkg found")
+    a = info["asset"]
+    name = os.path.basename(a["name"])
+    if not re.match(r"^luci-app-modem-monitor[\w.+-]*\.(apk|ipk)$", name):
+        raise ModemError("unexpected file name %r" % name)
+    if not a["url"].startswith("https://"):
+        raise ModemError("refusing non-HTTPS download")
+    data = _https_get(a["url"], timeout=60, accept="application/octet-stream")
+    if a.get("size") and len(data) != int(a["size"]):
+        raise ModemError("download size %d does not match the release (%s)" % (len(data), a["size"]))
+    digest = a.get("digest", "")
+    if digest.startswith("sha256:"):
+        got = hashlib.sha256(data).hexdigest()
+        if got != digest.split(":", 1)[1].lower():
+            raise ModemError("SHA-256 mismatch: download is not the file GitHub published")
+        check = "SHA-256 verified"
+    else:
+        check = "size verified (no checksum published)"
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+    path = os.path.join(UPDATE_DIR, name)
+    with open(path, "wb") as f:
+        f.write(data)
+    cmd = ("apk add --allow-untrusted '%s'" if tool == "apk" else "opkg install '%s'") % path
+    # Run detached: the upgrade restarts this service and reloads rpcd, which
+    # would cut off a LuCI request waiting on it. LuCI polls update-status.
+    script = ("sleep 2; echo \"$(date '+%%F %%T') installing %s\"; %s; rc=$?; "
+              "rm -f /tmp/luci-indexcache* /tmp/modem-monitor-update.json; rm -rf /tmp/luci-modulecache; "
+              "echo \"exit=$rc\"") % (name, cmd)
+    with open(UPDATE_LOG, "w") as lf:
+        lf.write("%s downloaded %s (%s)\n" % (time.strftime("%F %T"), name, check))
+    lf = open(UPDATE_LOG, "a")
+    subprocess.Popen(["/bin/sh", "-c", script], stdout=lf, stderr=subprocess.STDOUT,
+                     stdin=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    return "Installing %s (%s); this takes about a minute." % (info["latest"], check)
+
+
+def update_status():
+    try:
+        with open(UPDATE_LOG) as f:
+            txt = f.read()
+    except OSError:
+        return {"state": "idle", "log": ""}
+    m = re.search(r"^exit=(\d+)\s*$", txt, re.M)
+    return {"state": "done" if m else "running", "ok": bool(m and m.group(1) == "0"),
+            "log": txt[-4000:]}
+
+
+# --------------------------------------------------------------------------
 # Export: one zip with all data + diagnostics
 # --------------------------------------------------------------------------
 
@@ -1955,6 +2107,7 @@ def daemon(cfg):
     log("started v%s, polling %s every %ds" % (VERSION, cfg["host"], interval))
     last_rep = 0
     last_prune = 0
+    last_upd = time.time() - 86400 + 600  # first check ~10 min after start
     while True:
         t0 = time.time()
         try:
@@ -1967,6 +2120,12 @@ def daemon(cfg):
             except Exception as e:
                 log("report error: %r" % e)
             last_rep = time.time()
+        if cfg.get("update_check", "1") == "1" and time.time() - last_upd >= 86400:
+            try:
+                update_check(cfg)
+            except Exception as e:
+                log("update check error: %r" % e)
+            last_upd = time.time()
         if time.time() - last_prune >= 86400:
             try:
                 prune(cfg)
@@ -2002,6 +2161,24 @@ def main():
         except (ValueError, OSError, KeyError) as e:
             print("error: %s" % e)
             sys.exit(2)
+    elif cmd == "update-check":
+        info = update_check(cfg, force="--cached" not in args, cached="--cached" in args)
+        if "--json" in args:
+            print(json.dumps(info))
+        elif info["error"]:
+            print("error: %s" % info["error"])
+            sys.exit(1)
+        else:
+            print("installed %s, latest %s: %s" % (VERSION, info["latest"] or "?",
+                  "update available (%s)" % info["url"] if info["newer"] else "up to date"))
+    elif cmd == "update-install":
+        try:
+            print(update_install(cfg))
+        except (ModemError, OSError, urllib.error.URLError) as e:
+            print("error: %s" % e)
+            sys.exit(1)
+    elif cmd == "update-status":
+        print(json.dumps(update_status()))
     elif cmd == "reboot-modem":
         pos, kv, bools = _opts(args[1:])
         try:

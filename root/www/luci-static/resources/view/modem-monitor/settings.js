@@ -111,6 +111,26 @@ return view.extend({
 		o = s.option(form.Value, 'ping_targets', _('Ping targets'), _('Space-separated.'));
 		o.placeholder = '1.1.1.1 8.8.8.8';
 
+		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Updates'),
+			_('Checks the GitHub repository for a newer release once a day. When one exists, the Signal Report page offers to install it; nothing is installed without your click.'));
+
+		o = s.option(form.Flag, 'update_check', _('Check for updates'));
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'update_repo', _('GitHub repository'), _('owner/name; change this if you use a fork.'));
+		o.placeholder = 'RyanBlakeIT/luci-app-modem-monitor';
+
+		o = s.option(form.Button, '_check', _('Check now'));
+		o.inputtitle = _('Check now');
+		o.inputstyle = 'action';
+		o.onclick = function() {
+			return fs.exec('/usr/bin/modem-monitor', [ 'update-check' ]).then(function(res) {
+				ui.addNotification(null, E('p', {}, ((res.stdout || '') + (res.stderr || '')).trim() || _('No answer.')),
+					res.code === 0 ? 'info' : 'warning');
+			});
+		};
+
 		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Guideline ranges'),
 			_('Shaded "healthy" bands on the charts. These are common DOCSIS 3.1 guidelines, not your ISP\'s official specs.'));
 

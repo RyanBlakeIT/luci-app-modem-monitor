@@ -35,7 +35,10 @@ return view.extend({
 				.catch(function() { return false; }),
 			L.resolveDefault(fs.exec(BIN, [ 'maint-list', '--json' ]).then(function(res) {
 				try { return JSON.parse(res.stdout || '[]'); } catch (e) { return []; }
-			}), [])
+			}), []),
+			L.resolveDefault(fs.exec(BIN, [ 'update-check', '--json', '--cached' ]).then(function(res) {
+				try { return JSON.parse(res.stdout || 'null'); } catch (e) { return null; }
+			}), null)
 		]);
 	},
 
@@ -100,6 +103,68 @@ return view.extend({
 		]);
 	},
 
+	updateBanner: function(u) {
+		if (!u || !u.newer) return '';
+		var self = this;
+		return E('div', { 'class': 'alert-message notice', 'style': 'display:flex;align-items:center;gap:12px;flex-wrap:wrap' }, [
+			E('div', { 'style': 'flex:1;min-width:240px' }, [
+				E('strong', {}, _('Update available: version %s').format(u.latest)), ' ',
+				E('span', {}, _('(installed: %s)').format(u.current))
+			]),
+			E('button', { 'class': 'btn cbi-button', 'click': function() { self.showNotes(u, false); } }, _("What's new")),
+			E('button', { 'class': 'btn cbi-button cbi-button-positive', 'click': function() { self.showNotes(u, true); } }, _('Install update'))
+		]);
+	},
+
+	showNotes: function(u, install) {
+		var self = this;
+		var body = [
+			E('p', {}, _('Version %s (installed: %s). ').format(u.latest, u.current)),
+			E('pre', { 'style': 'white-space:pre-wrap;max-height:45vh;overflow:auto;font-size:12px' }, u.notes || _('No release notes.')),
+			E('p', {}, E('a', { 'href': u.url, 'target': '_blank', 'rel': 'noopener' }, _('Open the release on GitHub')))
+		];
+		if (install)
+			body.push(E('p', {}, _('The package is downloaded from GitHub, checked against the size and SHA-256 checksum GitHub publishes, then installed with the package manager. Your settings and data are kept. Monitoring pauses for a few seconds while the service restarts.')));
+		body.push(E('div', { 'class': 'right' }, [
+			E('button', { 'class': 'btn', 'click': ui.hideModal }, install ? _('Cancel') : _('Close')), ' ',
+			install ? E('button', { 'class': 'btn cbi-button-positive', 'click': function() { self.installUpdate(u); } }, _('Install %s').format(u.latest)) : ''
+		]));
+		ui.showModal(install ? _('Install update') : _("What's new in %s").format(u.latest), body);
+	},
+
+	installUpdate: function(u) {
+		var logEl = E('pre', { 'style': 'white-space:pre-wrap;max-height:40vh;overflow:auto;font-size:12px' }, _('Downloading…'));
+		ui.showModal(_('Installing version %s').format(u.latest), [ E('p', { 'class': 'spinning' }, _('Please keep this page open.')), logEl ]);
+		var finish = function(ok, text) {
+			ui.showModal(ok ? _('Update installed') : _('Update failed'), [
+				E('pre', { 'style': 'white-space:pre-wrap;max-height:45vh;overflow:auto;font-size:12px' }, text),
+				E('p', {}, ok ? _('Reload the page to use the new version. If a tab looks out of date, log out of LuCI and back in.') : _('Nothing was changed if the download was refused. You can also install manually from the release page.')),
+				E('div', { 'class': 'right' }, ok
+					? E('button', { 'class': 'btn cbi-button-positive', 'click': function() { location.reload(); } }, _('Reload'))
+					: E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Close')))
+			]);
+		};
+		return fs.exec(BIN, [ 'update-install' ]).then(function(res) {
+			var out = ((res.stdout || '') + (res.stderr || '')).trim();
+			if (res.code !== 0) return finish(false, out);
+			logEl.textContent = out;
+			var tries = 0;
+			var poll = function() {
+				tries++;
+				/* rpcd restarts during the upgrade, so failed polls are expected for a moment */
+				return L.resolveDefault(fs.exec(BIN, [ 'update-status' ]), null).then(function(r) {
+					var st = null;
+					try { st = r ? JSON.parse(r.stdout || 'null') : null; } catch (e) {}
+					if (st && st.log) logEl.textContent = st.log;
+					if (st && st.state === 'done') return finish(st.ok, st.log);
+					if (tries > 90) return finish(false, (st && st.log) || _('No result after 3 minutes; check System → Software or run: logread -e modem-monitor'));
+					return new Promise(function(res) { setTimeout(res, 2000); }).then(poll);
+				});
+			};
+			return poll();
+		}).catch(function(e) { finish(false, e.message || String(e)); });
+	},
+
 	maintNotice: function(entries) {
 		var nsug = entries.filter(function(m) { return m.status === 'suggested'; }).length;
 		var link = E('a', { 'href': L.url('admin/status/modem-monitor/maintenance') }, _('Maintenance Log'));
@@ -110,7 +175,7 @@ return view.extend({
 	},
 
 	render: function(data) {
-		var hasReport = data[0], entries = data[1] || [];
+		var hasReport = data[0], entries = data[1] || [], upd = data[2];
 		var self = this;
 		var buttons = E('div', { 'style': 'margin:8px 0 12px' }, [
 			E('button', {
@@ -155,6 +220,7 @@ return view.extend({
 			E('div', { 'class': 'cbi-map-descr' },
 				_('Signal levels, error counters and event log from the cable modem, sampled by this router. Use "Download all data" or the CSV files at the bottom of the report as evidence for your ISP or a regulator.')),
 			buttons,
+			this.updateBanner(upd),
 			this.maintNotice(entries),
 			body
 		]);

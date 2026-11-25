@@ -1,6 +1,8 @@
 
 config modem_monitor 'main'
 	option enabled '1'
+	option update_check '1'
+	option update_repo 'RyanBlakeIT/luci-app-modem-monitor'
 	option isp_name ''
 	option report_title ''
 	option report_note ''

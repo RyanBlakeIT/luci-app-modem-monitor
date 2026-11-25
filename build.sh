@@ -18,7 +18,7 @@ $APK mkpkg \
  --info "description:Cable modem signal monitor with LuCI report, maintenance log and data export" \
  --info "arch:noarch" --info "license:MIT" --info "origin:luci-app-modem-monitor" \
  --info "maintainer:${MAINTAINER:-}" --info "url:${URL:-}" \
- --info "depends:python3 luci-base rpcd-mod-file" \
+ --info "depends:python3 luci-base rpcd-mod-file ca-bundle" \
  --script "post-install:scripts/post-install" --script "post-upgrade:scripts/post-upgrade" \
  --script "pre-deinstall:scripts/pre-deinstall" --script "post-deinstall:scripts/post-deinstall" \
  --files root --output "out/luci-app-modem-monitor-$VER.apk"
