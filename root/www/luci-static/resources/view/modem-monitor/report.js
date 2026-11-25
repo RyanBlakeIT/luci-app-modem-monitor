@@ -116,18 +116,23 @@ return view.extend({
 		var pad = function(n) { return (n < 10 ? '0' : '') + n; };
 		var iso = function(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
 		var now = new Date(), from = E('input', { 'type': 'date', 'class': 'cbi-input-text', 'value': iso(new Date(now.getTime() - 29 * 86400000)) }),
-			to = E('input', { 'type': 'date', 'class': 'cbi-input-text', 'value': iso(now) });
+			to = E('input', { 'type': 'date', 'class': 'cbi-input-text', 'value': iso(now) }),
+			excl = E('input', { 'type': 'checkbox', 'checked': 'checked' });
 		ui.showModal(_('Complaint summary'), [
 			E('p', {}, _('A one-page, printable summary for a date range: findings in plain language, day-by-day counts, repairs and calls from the maintenance log, outages and the timeouts the modem logged. Print it or save it as a PDF for your ISP or a regulator.')),
 			E('div', { 'style': 'display:flex;gap:12px;align-items:center;flex-wrap:wrap' }, [
 				E('label', {}, [ _('From') + ' ', from ]), E('label', {}, [ _('To') + ' ', to ])
 			]),
+			E('label', { 'style': 'display:block;margin-top:10px' }, [ excl, ' ',
+				_('Leave out disruption caused by planned work (tech visits, reboots I started, router changes). The summary lists what was left out.') ]),
 			E('div', { 'class': 'right', 'style': 'margin-top:12px' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
 				E('button', { 'class': 'btn cbi-button-positive', 'click': function() {
 					if (!from.value || !to.value) return;
 					ui.showModal(_('Complaint summary'), [ E('p', { 'class': 'spinning' }, _('Building the summary…')) ]);
-					return exec([ 'summary', '--from', from.value, '--to', to.value ]).then(function() {
+					var args = [ 'summary', '--from', from.value, '--to', to.value ];
+					if (!excl.checked) args.push('--all');
+					return exec(args).then(function() {
 						var url = '/modem-monitor/summary.html?t=' + Date.now();
 						ui.showModal(_('Complaint summary ready'), [
 							E('p', {}, _('%s to %s. It opens in a new tab; use its "Print / Save as PDF" button.').format(from.value, to.value)),

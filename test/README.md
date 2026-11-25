@@ -20,3 +20,13 @@ curl http://127.0.0.1:18080/_relock     # simulate loss of signal without a rebo
 
 `MODEM_MONITOR_CONF` points the monitor at a key=value file instead of UCI, so
 it runs on any machine with Python 3.
+
+`mock_html.py` serves HTML status pages in the style of the Arris SB8200
+(`sb8200`, or `sb8200login` for firmware that requires a login) and Netgear CM
+modems (`netgear`), for the `arris_html` and `netgear` drivers:
+
+```sh
+python3 test/mock_html.py 18101 sb8200login Secret1 &
+printf 'host=127.0.0.1:18101\npassword=Secret1\ndata_dir=/tmp/h\nweb_dir=/tmp/hw\n' > /tmp/h.conf
+MODEM_MONITOR_CONF=/tmp/h.conf python3 root/usr/bin/modem-monitor test
+```

@@ -88,6 +88,14 @@ return view.extend({
 			_('Optional line shown under the report title, e.g. "Account 12345 \u00b7 Complaint 67890 \u00b7 123 Main St".'));
 		o.optional = true;
 
+		o = s.option(form.ListValue, 'modem_type', _('Modem type'),
+			_('Auto-detect works for most modems. Tested: Arris S33. Also supported, from published page layouts (please report how it goes): S34, SB8200, SB6183, SB6190 and Netgear CM600 to CM3000. Rebooting from the router works on S33/S34 only; the Netgear event log isn\'t read yet.'));
+		o.value('auto', _('Auto-detect'));
+		o.value('s33', _('Arris S33 / S34 (HNAP)'));
+		o.value('arris_html', _('Arris SB8200 / SB6183 / SB6190 (HTML pages)'));
+		o.value('netgear', _('Netgear CM series'));
+		o.default = 'auto';
+
 		o = s.option(form.Value, 'host', _('Modem address'));
 		o.datatype = 'host';
 		o.placeholder = '192.168.100.1';
@@ -145,6 +153,11 @@ return view.extend({
 		o = s.option(form.Value, 'retention_days', _('Keep history (days)'));
 		o.datatype = 'range(7,3650)';
 		o.placeholder = '90';
+
+		o = s.option(form.Flag, 'compress_old', _('Compress old months'),
+			_('gzip monthly data files older than last month (about 10x smaller). Reports, summaries and exports read them as usual.'));
+		o.default = '1';
+		o.rmempty = false;
 
 		o = s.option(form.Value, 'wan_device', _('Modem-facing network port'),
 			_('Error and link-drop counters are recorded for this port. Leave empty to use the device of the "wan" interface.'));

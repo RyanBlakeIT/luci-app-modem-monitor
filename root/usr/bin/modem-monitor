@@ -19,9 +19,11 @@ Commands:
   modem-monitor update-check [--json] [--cached]   is a newer release on GitHub?
   modem-monitor update-install   download (verified) and install the newer release
   modem-monitor update-status    progress of a running install (JSON)
-  modem-monitor summary [--from YYYY-MM-DD] [--to YYYY-MM-DD]
-                         one-page printable summary for a complaint (default: last 30 days)
+  modem-monitor summary [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--all]
+                         one-page printable summary for a complaint (default: last 30 days);
+                         disruption from planned work is left out unless --all
   modem-monitor alert-test   send a test notification to every configured alert channel
+  modem-monitor compress gzip monthly data files older than last month (also done daily)
   modem-monitor export   bundle all data + diagnostics into one .zip
                          (MAC/public IP addresses masked; --full keeps them)
 
@@ -31,6 +33,7 @@ Status > Cable Modem > Settings).
 
 import csv
 import glob
+import gzip
 import hashlib
 import hmac
 import json
@@ -47,7 +50,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -70,6 +73,8 @@ DEFAULTS = {
     "ds_power_max": "7",
     "ds_snr_min": "33",
     "timeout": "15",
+    "compress_old": "1",   # gzip monthly files older than last month
+    "modem_type": "auto",  # auto, s33 (HNAP: S33/S34), arris_html (SB8200/SB6183/SB6190), netgear
     "wan_device": "",  # empty = auto-detect from the 'wan' interface
     "update_check": "1",  # check GitHub for a newer release once a day
     "update_repo": "RyanBlakeIT/luci-app-modem-monitor",
@@ -663,6 +668,428 @@ def ping(target, count):
 
 
 # --------------------------------------------------------------------------
+# Modem drivers. Every driver offers:
+#   status() -> {"ds": [...], "us": [...], "uptime": s|None, "conninfo": {...}}
+#   events() -> [{"date": "D/M/YYYY", "time": "HH:MM:SS", "prio": "", "msg": ""}]
+#   info()   -> {"model", "firmware", "hardware"}
+#   reboot(cfg) -> outcome text   (raise ModemError if unsupported)
+# Channel dicts: ch, lock, mod, freq (MHz), power, snr, corr, uncorr (down);
+#                ch, lock, mod, width, freq, power (up).
+# --------------------------------------------------------------------------
+
+def _s33_status(self):
+    resp = self.call(["GetCustomerStatusDownstreamChannelInfo", "GetCustomerStatusUpstreamChannelInfo",
+                      "GetCustomerStatusConnectionInfo"])
+    conn = resp.get("GetCustomerStatusConnectionInfoResponse")
+    return {"ds": parse_downstream(resp.get("GetCustomerStatusDownstreamChannelInfoResponse", {})
+                                   .get("CustomerConnDownstreamChannel")),
+            "us": parse_upstream(resp.get("GetCustomerStatusUpstreamChannelInfoResponse", {})
+                                 .get("CustomerConnUpstreamChannel")),
+            "uptime": parse_uptime(conn), "conninfo": conn}
+
+
+def _s33_events(self):
+    return parse_events(self.call(["GetCustomerStatusLog"]).get("GetCustomerStatusLogResponse", {}))
+
+
+def _s33_info(self):
+    sw = self.call(["GetCustomerStatusSoftware"]).get("GetCustomerStatusSoftwareResponse", {})
+    return {"model": sw.get("StatusSoftwareModelName", ""), "firmware": sw.get("StatusSoftwareSfVer", ""),
+            "hardware": sw.get("StatusSoftwareHdVer", "")}
+
+
+def _s33_reboot(self, cfg):
+    eee, led = cfg.get("modem_eee", "0"), cfg.get("modem_led", "1")
+    try:
+        info = self.call(["GetArrisConfigurationInfo"]).get("GetArrisConfigurationInfoResponse", {})
+        for k, v in info.items():
+            kl = k.lower()
+            if isinstance(v, (str, int)) and "result" not in kl:
+                if "eee" in kl:
+                    eee = str(v)
+                elif "led" in kl:
+                    led = str(v)
+    except ModemError as e:
+        log("could not read current EEE/LED settings (%s); using configured %s/%s" % (e, eee, led))
+    r = self.set("SetArrisConfigurationInfo", {"Action": "reboot", "SetEEEEnable": eee, "LED_Status": led})
+    res = (r.get("SetArrisConfigurationInfoResponse") or {}).get("SetArrisConfigurationInfoResult", "")
+    if str(res).upper() not in ("OK", "REBOOT", ""):
+        raise ModemError("modem answered %r to the reboot request" % res)
+    return "modem accepted the reboot (%s)" % (res or "no result field")
+
+
+S33.status, S33.events, S33.info, S33.reboot = _s33_status, _s33_events, _s33_info, _s33_reboot
+S33.label = "Arris/CommScope SURFboard with HNAP web UI (S33, S34)"
+S33.can_reboot = True
+
+
+class _Table(__import__("html.parser").parser.HTMLParser):
+    """Collects every <table> as a list of rows of cell text."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables, self._stack, self._cell = [], [], None
+        self.text = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self._stack.append([])
+        elif tag == "tr" and self._stack:
+            self._stack[-1].append([])
+        elif tag in ("td", "th") and self._stack:
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None and self._stack and self._stack[-1]:
+            self._stack[-1][-1].append(" ".join("".join(self._cell).split()))
+            self._cell = None
+        elif tag == "table" and self._stack:
+            self.tables.append(self._stack.pop())
+
+    def handle_data(self, d):
+        if self._cell is not None:
+            self._cell.append(d)
+        self.text.append(d)
+
+
+def html_tables(page):
+    p = _Table()
+    p.feed(page)
+    return p.tables, " ".join(" ".join(p.text).split())
+
+
+def _col(header, *names):
+    h = [x.lower() for x in header]
+    for n in names:
+        for i, x in enumerate(h):
+            if x == n:
+                return i
+    for n in names:
+        for i, x in enumerate(h):
+            if n in x:
+                return i
+    return None
+
+
+def _find_table(tables, must):
+    """First table with a row containing all `must` words (case-insensitive);
+    returns (header_row, data_rows)."""
+    for t in tables:
+        for i, row in enumerate(t):
+            low = [c.lower() for c in row]
+            if all(any(m in c for c in low) for m in must):
+                return row, [r for r in t[i + 1:] if len(r) >= len(row) - 1 and any(c.strip() for c in r)]
+    return None, []
+
+
+def _mdy_to_dmy(s):
+    m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", s or "")
+    if not m:
+        return ""
+    a, b, y = int(m.group(1)), int(m.group(2)), m.group(3)
+    mo, d = (b, a) if a > 12 else (a, b)  # US pages: M/D/YYYY
+    return "%d/%d/%s" % (d, mo, y)
+
+
+MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+
+
+def _norm_event_time(s):
+    """'11/25/2026 13:06', 'Wed Nov 25 13:06:56 2026', 'Time Not Established' -> (D/M/YYYY, HH:MM:SS)."""
+    s = (s or "").strip()
+    m = re.search(r"(\d{1,2}/\d{1,2}/\d{2,4})\s+(\d{1,2}:\d{2}(?::\d{2})?)", s)
+    if m:
+        t = m.group(2) if m.group(2).count(":") == 2 else m.group(2) + ":00"
+        return _mdy_to_dmy(m.group(1)), t
+    m = re.search(r"([A-Za-z]{3})\s+(\d{1,2})\s+(\d{1,2}:\d{2}:\d{2})\s+(\d{4})", s)
+    if m and m.group(1).lower() in MONTHS:
+        return "%d/%d/%s" % (int(m.group(2)), MONTHS[m.group(1).lower()], m.group(4)), m.group(3)
+    return "1/1/1970", "00:00:00"  # not established yet: placed at boot time
+
+
+class _HttpModem:
+    """Shared plumbing for modems with a plain HTML status page."""
+    can_reboot = False
+
+    def __init__(self, cfg, st):
+        self.host = cfg["host"]
+        self.user = cfg.get("username") or "admin"
+        self.password = cfg.get("password") or ""
+        self.timeout = fnum(cfg, "timeout")
+        self.st = st
+        self.ctx = ssl.create_default_context()
+        self.ctx.check_hostname = False
+        self.ctx.verify_mode = ssl.CERT_NONE
+
+    def _get(self, path, headers=None, scheme=None):
+        schemes = [scheme] if scheme else [self.st.get("html_scheme") or "https", "http"]
+        last = None
+        for sc in dict.fromkeys(schemes):
+            url = "%s://%s%s" % (sc, self.host, path)
+            req = urllib.request.Request(url, headers=dict({"User-Agent": "Mozilla/5.0 modem-monitor"}, **(headers or {})))
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout, context=self.ctx if sc == "https" else None) as r:
+                    self.st["html_scheme"] = sc
+                    return r.read().decode("utf-8", "replace")
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    raise AuthError("HTTP %d on %s" % (e.code, path))
+                last = ModemError("HTTP %d on %s" % (e.code, path))
+                if e.code == 404:
+                    raise last
+            except (urllib.error.URLError, OSError) as e:
+                last = Unreachable("cannot reach modem at %s (%s)" % (url, getattr(e, "reason", e)))
+        raise last
+
+    def reboot(self, cfg):
+        raise ModemError("rebooting from the router isn't supported for this modem model yet; use the modem's web page")
+
+
+class ArrisHTML(_HttpModem):
+    """Arris/CommScope SURFboard models with HTML status pages: SB8200, SB6183,
+    SB6190, SB8200v3 and similar (newer SB8200 firmware needs a login)."""
+    label = "Arris/CommScope SURFboard with HTML status pages (SB8200, SB6183, SB6190)"
+    PAGES = {"status": ("/cmconnectionstatus.html", "/RgConnect.asp"),
+             "info": ("/cmswinfo.html", "/RgSwInfo.asp"),
+             "log": ("/cmeventlog.html", "/RgEventLog.asp")}
+
+    def _page(self, kind):
+        last = None
+        for p in self.PAGES[kind]:
+            if self.st.get("html_pages", {}).get(kind) not in (None, p):
+                continue
+            try:
+                body = self._authed(p)
+                self.st.setdefault("html_pages", {})[kind] = p
+                return body
+            except ModemError as e:
+                last = e
+                if isinstance(e, (AuthError, Unreachable)):
+                    raise
+        self.st.get("html_pages", {}).pop(kind, None)
+        raise last or ModemError("no %s page" % kind)
+
+    def _authed(self, path):
+        tok = self.st.get("html_token")
+        if tok:
+            body = self._get("%s?ct_%s" % (path, tok), {"Cookie": "credential=%s" % tok})
+            if "login" not in body.lower()[:3000] or "channel" in body.lower():
+                return body
+            self.st.pop("html_token", None)
+        try:
+            body = self._get(path)
+        except AuthError:
+            body = ""
+        low = body.lower()
+        if body and not ("password" in low and "login" in low and "channel" not in low):
+            return body
+        if not self.password:
+            raise AuthError("this modem needs its password (set it in Settings)")
+        import base64
+        cred = base64.b64encode(("%s:%s" % (self.user, self.password)).encode()).decode()
+        tok = self._get("%s?login_%s" % (path, cred), {"Authorization": "Basic " + cred}).strip()
+        if not tok or len(tok) > 200 or "<" in tok:
+            raise AuthError("modem refused the login")
+        self.st["html_token"] = tok
+        return self._get("%s?ct_%s" % (path, tok), {"Cookie": "credential=%s" % tok})
+
+    def status(self):
+        tables, text = html_tables(self._page("status"))
+        hd, rows = _find_table(tables, ["channel", "power", "uncorrect"])
+        ds = []
+        if hd:
+            c = {k: _col(hd, *n) for k, n in {"ch": ("channel id", "channel"), "lock": ("lock status",),
+                                               "mod": ("modulation",), "freq": ("frequency",), "power": ("power",),
+                                               "snr": ("snr/mer", "snr"), "corr": ("corrected",),
+                                               "uncorr": ("uncorrectables", "uncorrectable")}.items()}
+            for r in rows:
+                g = lambda k: r[c[k]] if c[k] is not None and c[k] < len(r) else ""
+                if not g("freq"):
+                    continue
+                ds.append({"ch": g("ch"), "lock": g("lock"), "mod": g("mod"), "freq": mhz(g("freq")),
+                           "power": num(g("power")), "snr": num(g("snr")), "corr": int(num(g("corr")) or 0),
+                           "uncorr": int(num(g("uncorr")) or 0)})
+        hu, rows = _find_table(tables, ["channel", "power", "width"])
+        if not hu:
+            hu, rows = _find_table(tables, ["channel", "power", "symbol"])
+        us = []
+        if hu:
+            c = {k: _col(hu, *n) for k, n in {"ch": ("channel id",), "lock": ("lock status",),
+                                               "mod": ("us channel type", "channel type", "modulation"),
+                                               "freq": ("frequency",), "width": ("width",), "power": ("power",)}.items()}
+            for r in rows:
+                g = lambda k: r[c[k]] if c[k] is not None and c[k] < len(r) else ""
+                if not g("freq"):
+                    continue
+                us.append({"ch": g("ch"), "lock": g("lock"), "mod": g("mod"), "width": mhz(g("width")),
+                           "freq": mhz(g("freq")), "power": num(g("power"))})
+        conn = {}
+        m = re.search(r"Current System Time:?\s*([A-Za-z]{3} [A-Za-z]{3} +\d+ [\d:]+ \d{4})", text)
+        if m:
+            conn["CustomerCurSystemTime"] = m.group(1)
+        up = None
+        m = UPTIME_RE.search(text)
+        if m:
+            up = parse_uptime({"x": m.group(0)})
+        else:
+            try:
+                up = parse_uptime({"x": html_tables(self._page("info"))[1]})
+            except ModemError:
+                pass
+        return {"ds": ds, "us": us, "uptime": up, "conninfo": conn}
+
+    def events(self):
+        tables, _ = html_tables(self._page("log"))
+        hd, rows = _find_table(tables, ["time", "description"])
+        if not hd:
+            return []
+        ct, cl, cd = _col(hd, "date time", "time"), _col(hd, "event level", "level", "priority"), _col(hd, "description")
+        out = []
+        for r in rows:
+            if cd is None or cd >= len(r):
+                continue
+            d, t = _norm_event_time(r[ct] if ct is not None and ct < len(r) else "")
+            out.append({"date": d, "time": t, "prio": "".join(ch for ch in (r[cl] if cl is not None and cl < len(r) else "") if ch.isdigit())[:1],
+                        "msg": r[cd]})
+        return list(reversed(out)) if len(out) > 1 and _try_ts(out[0]) > _try_ts(out[-1]) else out
+
+    def info(self):
+        tables, text = html_tables(self._page("info"))
+        g = lambda rx: (re.search(rx, text, re.I) or [None, ""])[1].strip()
+        model = g(r"\b(SB\d{4}v?\d?|S3\dv?\d?)\b")
+        if not model:
+            st_tables, st_text = html_tables(self._page("status"))
+            model = (re.search(r"\b(SB\d{4}v?\d?)\b", st_text) or [None, ""])[1]
+        return {"model": model, "firmware": g(r"Software Version:?\s*(\S+)"),
+                "hardware": g(r"Hardware Version:?\s*(\S+)")}
+
+
+class NetgearCM(_HttpModem):
+    """Netgear cable modems (CM500, CM600, CM700, CM1000, CM1100, CM1200, CM2000,
+    CM3000). The status page embeds its tables as '|'-separated JavaScript strings."""
+    label = "Netgear CM series (CM600 through CM3000)"
+
+    def _status_page(self):
+        import base64
+        cred = base64.b64encode(("%s:%s" % (self.user or "admin", self.password)).encode()).decode()
+        last = None
+        for p in ("/DocsisStatus.htm", "/DocsisStatus.asp"):
+            try:
+                body = self._get(p, {"Authorization": "Basic " + cred}, scheme=self.st.get("html_scheme") or "http")
+            except ModemError as e:
+                last = e
+                if isinstance(e, (AuthError, Unreachable)):
+                    raise
+                continue
+            if "tagValueList" in body:
+                return body
+            if "login" in body.lower():
+                raise AuthError("the modem shows a login form (newer Netgear firmware); not supported yet, please open an issue")
+        raise last or ModemError("no Netgear status page found")
+
+    @staticmethod
+    def _lists(body):
+        out = {}
+        for fn, val in re.findall(r"function\s+(\w+)\s*\([^)]*\)\s*\{[^}]*?var\s+tagValueList\s*=\s*['\"]([^'\"]*)['\"]", body, re.S):
+            out[fn] = [v.strip() for v in val.split("|")]
+        return out
+
+    @staticmethod
+    def _rows(vals):
+        if not vals or not vals[0].isdigit():
+            return []
+        n = int(vals[0])
+        body = [v for v in vals[1:]]
+        while body and body[-1] == "":
+            body.pop()
+        if n <= 0 or len(body) < n:
+            return []
+        w = len(body) // n
+        return [body[i * w:(i + 1) * w] for i in range(n)]
+
+    def status(self):
+        body = self._status_page()
+        L = self._lists(body)
+        ds, us = [], []
+        for r in self._rows(L.get("InitDsTableTagValue")):
+            # num | lock | modulation | channel id | freq | power | snr | corrected | uncorrectable
+            if len(r) >= 9:
+                ds.append({"ch": r[3], "lock": r[1], "mod": r[2], "freq": mhz(r[4]), "power": num(r[5]),
+                           "snr": num(r[6]), "corr": int(num(r[7]) or 0), "uncorr": int(num(r[8]) or 0)})
+        for r in self._rows(L.get("InitDsOfdmTableTagValue")):
+            # num | lock | profile | channel id | freq | power | snr | subcarriers | unerrored | corrected | uncorrectable
+            if len(r) >= 11 and r[1].strip().lower() == "locked":
+                ds.append({"ch": r[3], "lock": r[1], "mod": "OFDM", "freq": mhz(r[4]), "power": num(r[5]),
+                           "snr": num(r[6]), "corr": int(num(r[9]) or 0), "uncorr": int(num(r[10]) or 0)})
+        for r in self._rows(L.get("InitUsTableTagValue")):
+            # num | lock | type | channel id | symbol rate | freq | power
+            if len(r) >= 7:
+                us.append({"ch": r[3], "lock": r[1], "mod": r[2], "width": None, "freq": mhz(r[5]), "power": num(r[6])})
+        for r in self._rows(L.get("InitUsOfdmaTableTagValue")):
+            if len(r) >= 6 and r[1].strip().lower() == "locked":
+                us.append({"ch": r[3], "lock": r[1], "mod": "OFDMA", "width": None, "freq": mhz(r[4]), "power": num(r[5])})
+        text = " ".join(L.get("InitTagValue", [])) + " " + re.sub(r"<[^>]+>", " ", body)
+        up = None
+        m = re.search(r"(\d+)\s*days?\s*(\d{1,2}):(\d{2}):(\d{2})", text) or None
+        if m:
+            d, h, mi, s = (int(x) for x in m.groups())
+            up = d * 86400 + h * 3600 + mi * 60 + s
+        else:
+            up = parse_uptime({"x": text})
+        conn = {}
+        m = re.search(r"([A-Za-z]{3} [A-Za-z]{3} +\d+ [\d:]+ \d{4})", text)
+        if m:
+            conn["CustomerCurSystemTime"] = m.group(1)
+        return {"ds": ds, "us": us, "uptime": up, "conninfo": conn}
+
+    def events(self):
+        raise ModemError("the event log isn't read on Netgear modems yet")
+
+    def info(self):
+        body = self._status_page()
+        m = re.search(r"\b(CM\d{3,4}v?\d?)\b", body)
+        fw = re.search(r"V\d+\.\d+\.\d+\.\d+[\w.]*", body)
+        return {"model": "Netgear " + m.group(1) if m else "Netgear", "firmware": fw.group(0) if fw else "", "hardware": ""}
+
+
+DRIVERS = {"s33": S33, "arris_html": ArrisHTML, "netgear": NetgearCM}
+
+
+def make_driver(cfg, st):
+    """modem_type: auto (default), s33, arris_html, netgear. Auto keeps a working
+    S33 session, otherwise looks at the modem's front page once and remembers."""
+    t = (cfg.get("modem_type") or "auto").strip()
+    if t in DRIVERS:
+        return DRIVERS[t](cfg, st)
+    if st.get("driver") in DRIVERS:
+        return DRIVERS[st["driver"]](cfg, st)
+    if st.get("scheme") and st.get("algo"):  # a working HNAP login already exists
+        st["driver"] = "s33"
+        return S33(cfg, st)
+    probe = _HttpModem(cfg, st)
+    guess = None
+    for path in ("/", "/Login.html"):
+        try:
+            low = probe._get(path).lower()
+        except AuthError:
+            continue
+        except ModemError:
+            continue
+        if "hnap" in low or "surfboard central" in low or "soapaction" in low:
+            guess = "s33"
+        elif "netgear" in low:
+            guess = "netgear"
+        elif "cmconnectionstatus" in low or "rgconnect" in low or "sb8200" in low or "sb6183" in low or "sb6190" in low:
+            guess = "arris_html"
+        if guess:
+            break
+    st.pop("html_scheme", None)
+    if guess:
+        st["driver"] = guess
+        log("modem type detected: %s" % DRIVERS[guess].label)
+    return DRIVERS[guess or "s33"](cfg, st)
+
+# --------------------------------------------------------------------------
 # Router <-> modem Ethernet link (WAN NIC counters)
 # --------------------------------------------------------------------------
 
@@ -801,6 +1228,45 @@ def append_csv(path, cols, rows):
             w.writerow(r)
 
 
+def _topen(p):
+    """Open a data file as text; older months may be gzip-compressed (.gz)."""
+    if p.endswith(".gz"):
+        return gzip.open(p, "rt", newline="", encoding="utf-8", errors="replace")
+    return open(p, newline="", encoding="utf-8", errors="replace")
+
+
+def compress_old(cfg):
+    """gzip monthly files older than last month (CSV compresses about 8-10x).
+    Readers handle .gz transparently; the current and previous month stay plain."""
+    if cfg.get("compress_old", "1") != "1":
+        return 0
+    t = time.localtime()
+    y, m = (t.tm_year, t.tm_mon - 1) if t.tm_mon > 1 else (t.tm_year - 1, 12)
+    keep_from = "%04d-%02d" % (y, m)
+    n = 0
+    for p in glob.glob(os.path.join(cfg["data_dir"], "*-????-??.csv")) + \
+            glob.glob(os.path.join(cfg["data_dir"], "traces-????-??.log")):
+        mm = re.search(r"(\d{4}-\d{2})\.(csv|log)$", p)
+        if not mm or mm.group(1) >= keep_from or os.path.exists(p + ".gz"):
+            continue
+        try:
+            with open(p, "rb") as src, gzip.open(p + ".gz.tmp", "wb", compresslevel=6) as dst:
+                shutil.copyfileobj(src, dst)
+            os.chmod(p + ".gz.tmp", 0o644)
+            os.replace(p + ".gz.tmp", p + ".gz")
+            os.remove(p)
+            n += 1
+        except OSError as e:
+            log("compress %s failed: %s" % (p, e))
+            try:
+                os.remove(p + ".gz.tmp")
+            except OSError:
+                pass
+    if n:
+        log("compressed %d old monthly file%s" % (n, "" if n == 1 else "s"))
+    return n
+
+
 def month_file(cfg, kind, ts):
     return os.path.join(cfg["data_dir"], "%s-%s.csv" % (kind, time.strftime("%Y-%m", time.localtime(ts))))
 
@@ -808,8 +1274,9 @@ def month_file(cfg, kind, ts):
 def prune(cfg):
     keep = int(fnum(cfg, "retention_days"))
     cutoff = time.strftime("%Y-%m", time.localtime(time.time() - keep * 86400))
-    for p in glob.glob(os.path.join(cfg["data_dir"], "*-????-??.csv")):
-        m = re.search(r"(\d{4}-\d{2})\.csv$", p)
+    for p in glob.glob(os.path.join(cfg["data_dir"], "*-????-??.csv*")) + \
+            glob.glob(os.path.join(cfg["data_dir"], "traces-????-??.log*")):
+        m = re.search(r"(\d{4}-\d{2})\.(csv|log)(\.gz)?$", p)
         if m and m.group(1) < cutoff:
             os.remove(p)
     rows = load_maint(cfg)
@@ -1014,20 +1481,14 @@ def poll(cfg):
     row["temp"] = t if t is not None else ""
     row["precip"] = pr if pr is not None else ""
 
-    modem = S33(cfg, st)
+    modem = make_driver(cfg, st)
     events_new = []
     chd, chinfo = {}, {}
     ds, us = [], []
     try:
-        resp = modem.call(["GetCustomerStatusDownstreamChannelInfo",
-                           "GetCustomerStatusUpstreamChannelInfo",
-                           "GetCustomerStatusConnectionInfo"])
-        ds = parse_downstream(resp.get("GetCustomerStatusDownstreamChannelInfoResponse", {})
-                              .get("CustomerConnDownstreamChannel"))
-        us = parse_upstream(resp.get("GetCustomerStatusUpstreamChannelInfoResponse", {})
-                            .get("CustomerConnUpstreamChannel"))
-        uptime = parse_uptime(resp.get("GetCustomerStatusConnectionInfoResponse"))
-        co = modem_clock_offset(resp.get("GetCustomerStatusConnectionInfoResponse"), now)
+        S = modem.status()
+        ds, us, uptime = S["ds"], S["us"], S["uptime"]
+        co = modem_clock_offset(S.get("conninfo"), now)
         if co is not None:
             st["clock_offset"] = co
         if not ds and not us:
@@ -1035,7 +1496,7 @@ def poll(cfg):
         row["ok"] = 1
         row["uptime_s"] = uptime if uptime is not None else ""
 
-        sc = [c for c in ds if "ofdm" not in c["mod"].lower()]
+        sc = [c for c in ds if not _is_ofdm(c["mod"])]
         dsp = [c["power"] for c in ds if c["power"] is not None]
         snr = [c["snr"] for c in sc if c["snr"] is not None]
         usp = [c["power"] for c in us if c["power"] is not None]
@@ -1079,10 +1540,7 @@ def poll(cfg):
 
         if now - st.get("modem_info", {}).get("ts", 0) > 86400:
             try:
-                sw = modem.call(["GetCustomerStatusSoftware"]).get("GetCustomerStatusSoftwareResponse", {})
-                st["modem_info"] = {"ts": int(now), "model": sw.get("StatusSoftwareModelName", ""),
-                                    "firmware": sw.get("StatusSoftwareSfVer", ""),
-                                    "hardware": sw.get("StatusSoftwareHdVer", "")}
+                st["modem_info"] = dict(modem.info(), ts=int(now))
             except ModemError:
                 pass
 
@@ -1105,8 +1563,7 @@ def poll(cfg):
 
         # Event log (separate request; some firmware may not support it)
         try:
-            lr = modem.call(["GetCustomerStatusLog"]).get("GetCustomerStatusLogResponse", {})
-            evs = parse_events(lr)
+            evs = modem.events()
             clock = st.get("clock_offset")
             if clock is None:
                 # No readable modem clock: dated entries "in the future" mean UTC display.
@@ -1194,7 +1651,7 @@ def read_csvs(paths, since):
     rows = []
     for p in sorted(paths):
         try:
-            with open(p, newline="") as f:
+            with _topen(p) as f:
                 for r in csv.DictReader(f):
                     try:
                         if int(r["ts"]) >= since:
@@ -1209,8 +1666,9 @@ def read_csvs(paths, since):
 
 def files_since(cfg, kind, since):
     first = time.strftime("%Y-%m", time.localtime(since))
-    return [p for p in glob.glob(os.path.join(cfg["data_dir"], kind + "-????-??.csv"))
-            if re.search(r"(\d{4}-\d{2})\.csv$", p).group(1) >= first]
+    return [p for p in glob.glob(os.path.join(cfg["data_dir"], kind + "-????-??.csv*"))
+            if re.search(r"(\d{4}-\d{2})\.csv(\.gz)?$", p) and
+            re.search(r"(\d{4}-\d{2})\.csv(\.gz)?$", p).group(1) >= first]
 
 
 def fv(r, k):
@@ -1497,12 +1955,13 @@ def build_report(cfg):
     os.makedirs(dl, exist_ok=True)
     for d in (web, dl):
         os.chmod(d, 0o755)
-    for p in glob.glob(os.path.join(cfg["data_dir"], "*.csv")):
+    for p in glob.glob(os.path.join(cfg["data_dir"], "*.csv*")):
         os.chmod(p, 0o644)  # symlinked into the web dir for download
-    for p in glob.glob(os.path.join(dl, "*.csv")):
+    for p in glob.glob(os.path.join(dl, "*.csv*")):
         os.remove(p)
     files = []
-    for p in sorted(glob.glob(os.path.join(cfg["data_dir"], "*.csv")), reverse=True):
+    for p in sorted(glob.glob(os.path.join(cfg["data_dir"], "*.csv")) +
+                    glob.glob(os.path.join(cfg["data_dir"], "*.csv.gz")), reverse=True):
         n = os.path.basename(p)
         try:
             os.symlink(p, os.path.join(dl, n))
@@ -1745,7 +2204,8 @@ INGRESS_SHARE = 0.6    # share on 3 adjacent channels that counts as "concentrat
 
 
 def _is_ofdm(mod):
-    return "ofdm" in (mod or "").lower()
+    m = (mod or "").lower()
+    return "ofdm" in m or m == "other"  # SB8200 labels its OFDM channel "Other"
 
 
 def _bstart(t, size, _c={}):
@@ -1765,7 +2225,7 @@ def _bstart(t, size, _c={}):
     return b
 
 
-def channel_uncorr(cfg, specs, hi=None):
+def channel_uncorr(cfg, specs, hi=None, skip=None):
     """Uncorrectable codewords per downstream channel, summed into time buckets.
     specs: {name: (lo, bucket_s)}. Returns ({name: {ch: {bucket_ts: n}}}, info)
     where info = {ch: {"freq": MHz, "ofdm": bool}} (latest values seen)."""
@@ -1774,7 +2234,7 @@ def channel_uncorr(cfg, specs, hi=None):
     info, prev = {}, {}
     for p in files_since(cfg, "channels", lo_all - 86400):
         try:
-            f = open(p, newline="")
+            f = _topen(p)
         except OSError:
             continue
         with f:
@@ -1792,7 +2252,7 @@ def channel_uncorr(cfg, specs, hi=None):
                     info[ch] = {"freq": fr, "ofdm": _is_ofdm(r.get("mod"))}
                 pu = prev.get(ch)
                 prev[ch] = u
-                if pu is None or (hi is not None and t >= hi):
+                if pu is None or (hi is not None and t >= hi) or (skip and skip(t)):
                     continue
                 d = u - pu if u >= pu else u  # counters reset on reboot / re-registration
                 if d <= 0:
@@ -1936,7 +2396,9 @@ def send_alert(cfg, title, msg, prio=3, kind="info"):
     for ch in alert_targets(cfg):
         try:
             if ch == "ntfy":
-                h = {"Title": _hdr(title), "Priority": str(prio), "Tags": "warning" if prio >= 4 else "satellite_antenna"}
+                # tags that match ntfy emoji short names show as icons
+                tag = "white_check_mark" if "back online" in title.lower() else "warning" if prio >= 4 else "satellite"
+                h = {"Title": _hdr(title), "Priority": str(prio), "Tags": tag}
                 if g("alert_ntfy_token"):
                     h["Authorization"] = "Bearer " + g("alert_ntfy_token")
                 _http_post(ntfy_url(g("alert_ntfy_url")), msg, h)
@@ -2140,9 +2602,10 @@ def start_trace(cfg, st, now, why):
 
 def read_traces(cfg, since, limit=30):
     res = []
-    for p in sorted(glob.glob(os.path.join(cfg["data_dir"], "traces-*.log"))):
+    for p in sorted(glob.glob(os.path.join(cfg["data_dir"], "traces-*.log*"))):
         try:
-            text = open(p).read()
+            with _topen(p) as f:
+                text = f.read()
         except OSError:
             continue
         for block in text.split("### ")[1:]:
@@ -2427,7 +2890,37 @@ def _day_ts(s):
     return int(time.mktime(time.strptime(s, "%Y-%m-%d")))
 
 
-def complaint_summary(cfg, d_from, d_to):
+WORK_TYPES = ("tech", "modem-reboot", "router-change")
+
+
+def work_windows(maint, summ, interval):
+    """Time taken up by planned work, from the confirmed tech / modem-reboot /
+    router-change entries: from the start until the line has settled (first two
+    clean samples after the work ends, looked for up to an hour; otherwise 15
+    minutes after it ends, so lasting trouble is still counted)."""
+    ok = lambda r: (r.get("ok") == "1" and not r["_reb"] and not r["_rel"] and (fv(r, "ping_loss") or 0) == 0)
+    wins = []
+    for m in maint:
+        if m["status"] != "confirmed" or m["source"] == "auto" or m["type"] not in WORK_TYPES:
+            continue
+        a = int(m["ts"])
+        b = max(int(m.get("end_ts") or 0), a)
+        cand = [r for r in summ if b < int(r["ts"]) <= b + 3600]
+        if m["type"] == "modem-reboot":
+            hit = [i for i, r in enumerate(cand) if r["_reb"] and int(r["ts"]) <= b + 1800]
+            if hit:
+                cand = cand[hit[0] + 1:]
+        end = b + 900
+        for i, r in enumerate(cand):
+            if ok(r) and i + 1 < len(cand) and ok(cand[i + 1]):
+                end = int(r["ts"])
+                break
+        wins.append({"a": a, "b": max(end, a + interval), "type": m["type"], "note": m["note"],
+                     "time": m["time"][:16]})
+    return wins
+
+
+def complaint_summary(cfg, d_from, d_to, exclude_work=True):
     lo, hi0 = _day_ts(d_from), _day_ts(d_to)
     if hi0 < lo:
         lo, hi0 = hi0, lo
@@ -2444,8 +2937,35 @@ def complaint_summary(cfg, d_from, d_to):
         r["_err"] = max(0, tot(r) - tot(pr)) if pr else 0
         prevl[r.get("dev")] = r
     links = [r for r in links if int(r["ts"]) >= lo]
-    maint = [r for r in sorted(load_maint(cfg), key=lambda r: int(r["ts"])) if lo <= int(r["ts"]) < hi]
-    ch, info = channel_uncorr(cfg, {"day": (lo, 86400)}, hi=hi)
+    allm = sorted(load_maint(cfg), key=lambda r: int(r["ts"]))
+    maint = [r for r in allm if lo <= int(r["ts"]) < hi]
+    planned = [(int(m["ts"]), max(int(m["end_ts"] or 0), int(m["ts"])) + 1800) for m in maint
+               if m["status"] == "confirmed" and m["source"] != "auto" and m["type"] in ("modem-reboot", "tech")]
+    expl = sum(1 for r in summ if r["_reb"] and any(a <= int(r["ts"]) <= b for a, b in planned))
+    wins = []
+    if exclude_work:
+        wins = [w for w in work_windows([m for m in allm if lo - 86400 <= int(m["ts"]) < hi], summ, interval)
+                if w["b"] > lo and w["a"] < hi]
+        inw = lambda t: next((w for w in wins if w["a"] <= t < w["b"]), None)
+        for w in wins:
+            w.update(samples=0, t34=0, uncorr=0, down=0, reb=0, rel=0)
+        for r in summ:
+            w = inw(int(r["ts"]))
+            if w:
+                w["samples"] += 1
+                w["uncorr"] += int(fv(r, "uncorr_delta") or 0) if r.get("ok") == "1" else 0
+                w["down"] += 1 if modem_down(r) else 0
+                w["reb"] += 1 if r["_reb"] else 0
+                w["rel"] += 1 if r["_rel"] else 0
+        for e in events:
+            w = inw(int(e["ts"]))
+            if w and e["type"] in ("T3", "T4"):
+                w["t34"] += 1
+        summ = [r for r in summ if not inw(int(r["ts"]))]
+        events = [e for e in events if not inw(int(e["ts"]))]
+        links = [r for r in links if not inw(int(r["ts"]))]
+    ch, info = channel_uncorr(cfg, {"day": (lo, 86400)}, hi=hi,
+                             skip=(lambda t: any(w["a"] <= t < w["b"] for w in wins)) if wins else None)
     ingress = ingress_findings(ch["day"], info)
     ing_by_day = {f["day"]: f for f in ingress}
     st = load_state(cfg)
@@ -2501,11 +3021,6 @@ def complaint_summary(cfg, d_from, d_to):
     down_min = sum(round((o["end"] - o["start"]) / 60 + interval / 60) for o in outs)
     usm = [x["us_max"] for x in rows if x["us_max"] is not None]
     worst = max(rows, key=lambda x: x["uncorr"]) if rows else None
-    # a reboot is "explained" if a confirmed log entry (planned reboot, tech visit)
-    # covers it: started up to 30 min before it, or still running
-    planned = [(int(m["ts"]), max(int(m["end_ts"] or 0), int(m["ts"])) + 1800) for m in maint
-               if m["status"] == "confirmed" and m["source"] != "auto" and m["type"] in ("modem-reboot", "tech")]
-    expl = sum(1 for r in summ if r["_reb"] and any(a <= int(r["ts"]) <= b for a, b in planned))
     pings = [fv(r, "ping_loss") for r in summ if fv(r, "ping_loss") is not None]
     data = {
         "title": (cfg.get("report_title") or "").strip() or "Cable internet service problems: summary",
@@ -2516,7 +3031,7 @@ def complaint_summary(cfg, d_from, d_to):
                                                       ("us_power_min", "us_power_max", "ds_power_min", "ds_power_max", "ds_snr_min")},
         "tot": {"days": len(rows), "mon_days": len(mon), "bad_days": sum(1 for x in mon if x["bad"]),
                 "T3": S("T3"), "T4": S("T4"), "DRW": S("DRW"), "REG": S("REG"), "uncorr": S("uncorr"),
-                "reboots": S("reboots"), "router_reboots": expl, "relocks": S("relocks"),
+                "reboots": S("reboots"), "router_reboots": 0 if exclude_work else expl, "relocks": S("relocks"),
                 "outages": len(outs), "down_min": down_min, "loss_polls": S("loss"), "polls": S("polls"),
                 "us_peak": max(usm) if usm else None, "us_over_days": sum(1 for x in rows if x["us_over"]),
                 "link_err": S("link_err"), "link_on": bool(links),
@@ -2527,7 +3042,11 @@ def complaint_summary(cfg, d_from, d_to):
                 "loss_avg": round(sum(pings) / len(pings), 2) if pings else None,
                 "worst_day": worst["day"] if worst and worst["uncorr"] else None,
                 "worst_unc": worst["uncorr"] if worst else 0},
-        "days": rows, "ingress": ingress,
+        "days": rows, "ingress": ingress, "exclude_work": bool(exclude_work),
+        "excluded": [{"start": time.strftime("%Y-%m-%d %H:%M", time.localtime(w["a"])),
+                      "end": time.strftime("%Y-%m-%d %H:%M", time.localtime(w["b"])), "type": w["type"],
+                      "note": w["note"], "samples": w["samples"], "t34": w["t34"], "uncorr": w["uncorr"],
+                      "down": w["down"], "reb": w["reb"], "rel": w["rel"]} for w in wins],
         "weather": weather_text(weather_effects(summ), "\u00b0F" if (cfg.get("weather_unit") or "C").upper().startswith("F") else "\u00b0C"),
         "outages": [{"start": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["start"])),
                      "mins": round((o["end"] - o["start"]) / 60 + interval / 60), "why": o["why"]} for o in outs][:60],
@@ -2592,7 +3111,7 @@ if(T.uncorr)F.push("<b>"+f(T.uncorr)+" uncorrectable codewords</b>: downstream d
 const NI=D.ingress.filter(i=>i.kind==="narrow");
 if(NI.length)F.push("On <b>"+pl(NI.length,"day")+"</b> the errors were concentrated on a few adjacent channels ("+NI.slice(0,4).map(i=>i.day+": "+i.share+"% on "+i.fmin+"–"+i.fmax+" MHz").join("; ")+(NI.length>4?"; …":"")+"). Errors confined to a narrow band are typical of <b>RF ingress</b>: an outside signal leaking into the cable through a damaged line, loose connector or faulty tap.");
 if(T.us_peak!=null&&T.us_peak>L.us_power_max)F.push("Upstream transmit power reached <b>"+T.us_peak+" dBmV</b>, above the "+L.us_power_max+" dBmV guideline, on "+pl(T.us_over_days,"day")+": the modem had to transmit at or near its maximum to be heard, which suggests loss in the line or tap.");
-{const u=Math.max(0,T.reboots-T.router_reboots),P=[];if(u)P.push("rebooted "+pl(u,"time")+" on its own");if(T.relocks)P.push("lost signal and re-registered "+pl(T.relocks,"time")+" without rebooting");if(P.length)F.push("The modem "+P.join(" and ")+"."+(T.router_reboots?" ("+pl(T.router_reboots,"planned reboot")+" listed below "+(T.router_reboots===1?"is":"are")+" not counted.)":""))}
+{const u=Math.max(0,T.reboots-T.router_reboots),P=[];if(u)P.push("rebooted "+pl(u,"time")+" on its own");if(T.relocks)P.push("lost signal and re-registered "+pl(T.relocks,"time")+" without rebooting");if(P.length)F.push("The modem "+P.join(" and ")+"."+(T.router_reboots?" ("+pl(T.router_reboots,"planned reboot")+" listed below "+(T.router_reboots===1?"is":"are")+" not included.)":""))}
 if(T.gw_on&&T.loss_polls){if(T.both_loss>=Math.max(1,T.loss_polls/2))F.push("In "+pl(T.both_loss,"sample")+" with packet loss, pings to "+esc(isp)+"\u2019s own gateway (the first hop past the modem) failed too, so the loss starts on the local cable segment, not further out on the internet."+(T.traces?" "+pl(T.traces,"traceroute was","traceroutes were")+" saved during the loss.":""));else if(T.traces)F.push(pl(T.traces,"traceroute was","traceroutes were")+" saved during packet loss.")}
 (D.weather||[]).forEach(w=>F.push(esc(w)));
 if(T.outages)F.push(pl(T.outages,"outage")+" (modem unreachable or no internet), about "+f(T.down_min)+" minutes in total.");
@@ -2611,6 +3130,8 @@ const many=D.days.length>62,DR=many?D.days.filter(r=>r.bad):D.days;
 h+=(many?"<div class=muted>Only days with problems are listed ("+DR.length+").</div>":"")+"<table><tr><th>Day</th><th class=n>T3</th><th class=n>T4</th><th class=n>Re-reg. events</th><th class=n>Uncorrectables</th><th class=n>Peak US dBmV</th><th class=n>Reboots</th><th class=n>Re-reg.</th><th class=n>Unreachable samples</th><th class=n>Loss samples</th><th>Pattern</th></tr>"+
  DR.map(r=>"<tr"+(r.bad?" class=bad":"")+"><td>"+r.day+"</td><td class=n>"+r.T3+"</td><td class=n>"+r.T4+"</td><td class=n>"+r.REG+"</td><td class=n>"+f(r.uncorr)+"</td><td class=n>"+f(r.us_max)+"</td><td class=n>"+r.reboots+"</td><td class=n>"+r.relocks+"</td><td class=n>"+r.down+"</td><td class=n>"+r.loss+"</td><td>"+(r.ingress?(r.ingress.kind==="narrow"?"ingress? "+r.ingress.share+"% on "+r.ingress.fmin+"–"+r.ingress.fmax+" MHz":"spread across band"):(r.polls?"":(r.logged?"modem log only":"no data")))+"</td></tr>").join("")+"</table>";
 if(D.maint.length)h+="<h2>Repairs, calls and changes</h2><table><tr><th>When</th><th>Type</th><th>What happened</th></tr>"+D.maint.map(m=>"<tr><td>"+esc(m.time)+(m.end?" to "+esc(m.end.slice(0,10)===m.time.slice(0,10)?m.end.slice(11):m.end):"")+"</td><td style='white-space:nowrap'>"+esc(m.type)+(m.status==="suggested"?" (auto-detected)":"")+"</td><td>"+esc(m.note)+"</td></tr>").join("")+"</table>";
+if(D.excluded.length){h+="<h2>Left out of the counts</h2><p class=muted>Disruption caused by planned work (technician visits, reboots I started, changes to my own router) is not counted above, from the start of the work until the line settled. What those windows contained:</p><table><tr><th>Window</th><th>Work</th><th class=n>Samples</th><th class=n>T3/T4</th><th class=n>Uncorrectables</th><th class=n>Unreachable</th><th class=n>Reboots / re-reg.</th></tr>"+D.excluded.map(w=>"<tr><td>"+w.start+" to "+(w.end.slice(0,10)===w.start.slice(0,10)?w.end.slice(11):w.end)+"</td><td>"+esc(w.type)+": "+esc(w.note.length>80?w.note.slice(0,80)+"\u2026":w.note)+"</td><td class=n>"+w.samples+"</td><td class=n>"+w.t34+"</td><td class=n>"+f(w.uncorr)+"</td><td class=n>"+w.down+"</td><td class=n>"+w.reb+" / "+w.rel+"</td></tr>").join("")+"</table>"}
+else if(!D.exclude_work)h+="<p class=muted>All recorded data is counted, including any disruption caused by planned work.</p>";
 if(D.outages.length)h+="<h2>Outages</h2><table><tr><th>Start</th><th class=n>About (min)</th><th>Detail</th></tr>"+D.outages.map(o=>"<tr><td>"+o.start+"</td><td class=n>"+o.mins+"</td><td>"+esc(o.why)+"</td></tr>").join("")+"</table>";
 if(D.t34.length)h+="<h2>Timeouts logged by the modem"+(T.T3+T.T4>D.t34.length?" (latest "+D.t34.length+")":"")+"</h2><table><tr><th>Time</th><th>Type</th><th>Modem log message</th></tr>"+D.t34.map(e=>"<tr><td>"+e.time+"</td><td>"+e.type+"</td><td>"+esc(e.msg)+"</td></tr>").join("")+"</table>";
 h+="<h2>How this was measured</h2><p class=muted>The router polled the cable modem's status page every "+Math.round(D.interval/60)+" minutes, recording downstream and upstream signal levels, error counters and the modem's own event log, and pinged the internet each time. Timeouts are counted from the modem's event log. Guidelines used: upstream power "+L.us_power_min+"–"+L.us_power_max+" dBmV, downstream power "+L.ds_power_min+" to +"+L.ds_power_max+" dBmV, SNR at least "+L.ds_snr_min+" dB. The full raw data (CSV) is available on request. Generated by luci-app-modem-monitor.</p>";
@@ -2629,27 +3150,13 @@ def reboot_modem(cfg, note="", force=False):
     if not force and now - last < 600:
         raise ModemError("a reboot was issued %d minutes ago; wait 10 minutes or use --force"
                          % ((now - last) // 60))
-    m = S33(cfg, st)
-    eee, led = cfg.get("modem_eee", "0"), cfg.get("modem_led", "1")
-    try:
-        info = m.call(["GetArrisConfigurationInfo"]).get("GetArrisConfigurationInfoResponse", {})
-        for k, v in info.items():
-            kl = k.lower()
-            if isinstance(v, (str, int)) and "result" not in kl:
-                if "eee" in kl:
-                    eee = str(v)
-                elif "led" in kl:
-                    led = str(v)
-    except ModemError as e:
-        log("could not read current EEE/LED settings (%s); using configured %s/%s" % (e, eee, led))
-    payload = {"Action": "reboot", "SetEEEEnable": eee, "LED_Status": led}
+    m = make_driver(cfg, st)
+    if not getattr(m, "can_reboot", False):
+        raise ModemError("rebooting from the router isn't supported for this modem model (%s); use its web page"
+                         % getattr(m, "label", "?"))
     issued_note = "Reboot issued from router" + (": " + note if note else "")
     try:
-        r = m.set("SetArrisConfigurationInfo", payload)
-        res = (r.get("SetArrisConfigurationInfoResponse") or {}).get("SetArrisConfigurationInfoResult", "")
-        if str(res).upper() not in ("OK", "REBOOT", ""):
-            raise ModemError("modem answered %r to the reboot request" % res)
-        outcome = "modem accepted the reboot (%s)" % (res or "no result field")
+        outcome = m.reboot(cfg)
     except Unreachable:
         # The modem can drop the connection as it goes down.
         outcome = "no reply (modem probably already rebooting)"
@@ -2843,6 +3350,9 @@ def update_check(cfg, force=False, cached=False):
     return info
 
 
+APK_KEY = "/etc/apk/keys/luci-app-modem-monitor.pem"
+
+
 def update_install(cfg):
     info = update_check(cfg, force=True)
     if info["error"]:
@@ -2873,7 +3383,13 @@ def update_install(cfg):
     path = os.path.join(UPDATE_DIR, name)
     with open(path, "wb") as f:
         f.write(data)
-    cmd = ("apk add --allow-untrusted '%s'" if tool == "apk" else "opkg install '%s'") % path
+    # Once a signed release is installed, its public key is in /etc/apk/keys and
+    # every later update must carry a valid signature from the same key.
+    if tool == "apk":
+        trust = "" if os.path.exists(APK_KEY) else "--allow-untrusted "
+        cmd = "apk add %s'%s'" % (trust, path)
+    else:
+        cmd = "opkg install '%s'" % path
     # Run detached: the upgrade restarts this service and reloads rpcd, which
     # would cut off a LuCI request waiting on it. LuCI polls update-status.
     script = ("sleep 2; echo \"$(date '+%%F %%T') installing %s\"; %s; rc=$?; "
@@ -3015,13 +3531,14 @@ def export(cfg, full=False):
     except ImportError:
         comp = zipfile.ZIP_STORED
     clean = (lambda t: t) if full else redact
-    files = sorted(glob.glob(os.path.join(cfg["data_dir"], "*.csv")))
+    files = sorted(glob.glob(os.path.join(cfg["data_dir"], "*.csv")) + glob.glob(os.path.join(cfg["data_dir"], "*.csv.gz"))
+                   + glob.glob(os.path.join(cfg["data_dir"], "traces-*.log*")))
     with zipfile.ZipFile(tmp, "w", comp) as z:
         for p in files:
             n = os.path.basename(p)
-            if n == "events.csv":
-                with open(p, encoding="utf-8", errors="replace") as f:
-                    z.writestr("data/" + n, clean(f.read()))
+            if n == "events.csv" or ".log" in n:
+                with _topen(p) as f:
+                    z.writestr("data/" + n.replace(".gz", ""), clean(f.read()))
             else:
                 z.write(p, "data/" + n)
         rep = os.path.join(web, "index.html")
@@ -3056,25 +3573,29 @@ def test(cfg, raw=False):
     st = load_state(cfg) if os.path.isdir(cfg["data_dir"]) else {}
     st.pop("login_backoff_until", None)  # manual test always tries
     st.pop("uid", None)
-    m = S33(cfg, st)
-    print("Modem: %s  user: %s" % (cfg["host"], cfg["username"]))
+    st.pop("html_token", None)
+    if (cfg.get("modem_type") or "auto") == "auto":
+        st.pop("driver", None)  # detect again
+    print("Modem: %s  user: %s  type setting: %s" % (cfg["host"], cfg["username"], cfg.get("modem_type") or "auto"))
+    m = make_driver(cfg, st)
+    print("Driver: %s" % m.label)
     try:
-        m.login()
+        if isinstance(m, S33):
+            m.login()
+            print("Login OK (%s, HMAC-%s)" % (st["scheme"].upper(), st["algo"].upper()))
+        S = m.status()
     except ModemError as e:
         print("FAILED: %s" % e)
         if os.path.isdir(cfg["data_dir"]):
             save_state(cfg, st)
         return 1
-    print("Login OK (%s, HMAC-%s)" % (st["scheme"].upper(), st["algo"].upper()))
-    resp = m.call(["GetCustomerStatusDownstreamChannelInfo", "GetCustomerStatusUpstreamChannelInfo",
-                   "GetCustomerStatusConnectionInfo", "GetCustomerStatusSoftware"])
-    sw = resp.get("GetCustomerStatusSoftwareResponse", {})
-    for k in ("StatusSoftwareModelName", "StatusSoftwareSfVer", "StatusSoftwareHdVer"):
-        if sw.get(k):
-            print("%s: %s" % (k.replace("StatusSoftware", ""), sw[k]))
-    ds = parse_downstream(resp.get("GetCustomerStatusDownstreamChannelInfoResponse", {}).get("CustomerConnDownstreamChannel"))
-    us = parse_upstream(resp.get("GetCustomerStatusUpstreamChannelInfoResponse", {}).get("CustomerConnUpstreamChannel"))
-    up = parse_uptime(resp.get("GetCustomerStatusConnectionInfoResponse"))
+    try:
+        for k, v in m.info().items():
+            if v:
+                print("%s: %s" % (k.capitalize(), v))
+    except ModemError as e:
+        print("Model info: unavailable (%s)" % e)
+    ds, us, up = S["ds"], S["us"], S["uptime"]
     print("Uptime: %s" % (str(timedelta(seconds=up)) if up is not None else "unknown"))
     print("\nDownstream: %d channels" % len(ds))
     for c in ds:
@@ -3084,22 +3605,24 @@ def test(cfg, raw=False):
     for c in us:
         print("  ch %-3s %-8s %-9s %8s MHz  power %6s dBmV" % (c["ch"], c["lock"], c["mod"], c["freq"], c["power"]))
     try:
-        lr = m.call(["GetCustomerStatusLog"]).get("GetCustomerStatusLogResponse", {})
-        evs = parse_events(lr)
+        evs = m.events()
         print("\nEvent log: %d entries (last 8 shown)" % len(evs))
         for e in evs[-8:]:
             print("  %s %s [%s] %s" % (e["date"], e["time"], classify(e["msg"]), e["msg"]))
     except ModemError as e:
         print("\nEvent log: unavailable (%s)" % e)
-        lr = {}
+    print("\nReboot from the router: %s" % ("supported" if getattr(m, "can_reboot", False) else "not supported for this model"))
     if raw:
         print("\n--- raw ---")
-        print(json.dumps(resp, indent=1)[:20000])
-        print(json.dumps(lr, indent=1)[:20000])
+        if isinstance(m, S33):
+            print(json.dumps(m.call(["GetCustomerStatusDownstreamChannelInfo", "GetCustomerStatusUpstreamChannelInfo",
+                                     "GetCustomerStatusConnectionInfo", "GetCustomerStatusSoftware"]), indent=1)[:20000])
+            print(json.dumps(m.call(["GetCustomerStatusLog"]), indent=1)[:20000])
+        else:
+            print(json.dumps(S, indent=1, default=str)[:20000])
     if os.path.isdir(cfg["data_dir"]):
         save_state(cfg, st)
     return 0
-
 
 # --------------------------------------------------------------------------
 
@@ -3131,6 +3654,7 @@ def daemon(cfg):
         if time.time() - last_prune >= 86400:
             try:
                 prune(cfg)
+                compress_old(cfg)
             except OSError:
                 pass
             last_prune = time.time()
@@ -3195,7 +3719,7 @@ def main():
         d_to = kv.get("to") or today
         d_from = kv.get("from") or time.strftime("%Y-%m-%d", time.localtime(time.time() - 29 * 86400))
         try:
-            print(complaint_summary(cfg, d_from, d_to))
+            print(complaint_summary(cfg, d_from, d_to, exclude_work="all" not in bools))
         except ValueError as e:
             print("error: dates must be YYYY-MM-DD (%s)" % e)
             sys.exit(2)
@@ -3213,6 +3737,8 @@ def main():
         print(p)
     elif cmd == "test":
         sys.exit(test(cfg, "--raw" in args))
+    elif cmd == "compress":
+        print("compressed %d file(s)" % compress_old(dict(cfg, compress_old="1")))
     elif cmd in ("version", "--version"):
         print(VERSION)
     else:

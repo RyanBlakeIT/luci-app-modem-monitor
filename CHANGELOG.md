@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.0
+- **Signed releases:** packages are signed in CI with the project key, and the public key ships in the package (`/etc/apk/keys/luci-app-modem-monitor.pem`) and with each release. Once 1.4.0 is installed, in-browser updates install without `--allow-untrusted`, and apk refuses any update without a valid signature from that key, on top of the SHA-256 check.
+- **More modems:** a driver layer with auto-detection, set under **Settings → Modem type**:
+  - S33/S34 (HNAP)
+  - Arris SB8200, SB6183 and SB6190 (HTML status pages, including the SB8200 login)
+  - Netgear CM600 to CM3000
+
+  The new drivers follow published page layouts and are tested against mock pages; reports from real hardware are welcome. Rebooting from the router remains S33/S34-only.
+- **Compressed history:** monthly data files older than last month are gzip-compressed daily, about 10–17x smaller. Reports, summaries, downloads and exports read them as before. Turn this off under Settings → Storage, or run it now with `modem-monitor compress`.
+- **Complaint summary leaves out planned work:** the time covered by confirmed tech-visit, modem-reboot and router-change entries is not counted, from the start of the work until the line settles (the first two clean samples within an hour, otherwise 15 minutes after it ends). A **Left out of the counts** section lists each window and what it contained. Turn this off with the checkbox in the dialog or `summary --all`.
+- Traceroute logs are included in exports, with public IP addresses masked like everything else.
+- ntfy alerts show proper icons (📡, ⚠️, ✅) instead of a text tag.
+
 ## 1.3.0
 - **ISP gateway ping:** every sample also pings the first hop past the modem (the WAN default gateway). The packet loss and latency charts show the internet and the gateway side by side. The complaint summary notes when the loss starts on the local cable segment.
 - **Traceroute during packet loss:** saved automatically, at most every 15 minutes, to `traces-YYYY-MM.log`. Shown on the report and counted in the complaint summary.

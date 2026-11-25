@@ -38,6 +38,14 @@ jobs:
           python3 root/usr/bin/modem-monitor summary
           test -s /tmp/mm-www/summary.html
           grep -q '^modem_up 1' /tmp/mm-www/metrics.txt
+          for k in sb8200:18101 sb8200login:18102 netgear:18103; do
+            n=${k%%:*}; p=${k##*:}
+            python3 test/mock_html.py $p $n Secret1 &
+            sleep 1
+            printf "host=127.0.0.1:$p\npassword=Secret1\ndata_dir=/tmp/h-$n/data\nweb_dir=/tmp/h-$n/www\nping_targets=127.0.0.1\nping_count=1\ntimeout=5\n" > /tmp/h-$n.conf
+            MODEM_MONITOR_CONF=/tmp/h-$n.conf python3 root/usr/bin/modem-monitor test
+            MODEM_MONITOR_CONF=/tmp/h-$n.conf python3 root/usr/bin/modem-monitor poll | grep -qx ok
+          done
           ! python3 root/usr/bin/modem-monitor alert-test
           python3 root/usr/bin/modem-monitor mark "CI entry" --type other
           python3 root/usr/bin/modem-monitor export
@@ -53,13 +61,34 @@ jobs:
           meson setup build -Ddocs=disabled -Dlua=disabled -Dzstd=disabled -Dtests=disabled -Dhelp=disabled -Dcrypto_backend=openssl
           ninja -C build
 
-      - name: Build package
-        run: APK=/tmp/apk-tools/build/src/apk MAINTAINER=RyanBlakeIT URL=https://github.com/${{ github.repository }} ./build.sh
+      - name: Build package (signed when the APK_SIGN_KEY secret is set)
+        env:
+          APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
+        run: |
+          if [ -n "$APK_SIGN_KEY" ]; then
+            umask 077
+            printf '%s\n' "$APK_SIGN_KEY" > "$RUNNER_TEMP/sign.pem"
+            mkdir -p root/etc/apk/keys out
+            # the matching public key ships in the package so later updates verify against it
+            openssl ec -in "$RUNNER_TEMP/sign.pem" -pubout -out root/etc/apk/keys/luci-app-modem-monitor.pem
+            chmod 644 root/etc/apk/keys/luci-app-modem-monitor.pem
+            cp root/etc/apk/keys/luci-app-modem-monitor.pem out/luci-app-modem-monitor.pem
+            export SIGN_KEY="$RUNNER_TEMP/sign.pem"
+          fi
+          APK=/tmp/apk-tools/build/src/apk MAINTAINER=RyanBlakeIT URL=https://github.com/${{ github.repository }} ./build.sh
+          rm -f "$RUNNER_TEMP/sign.pem"
+          if [ -f out/luci-app-modem-monitor.pem ]; then
+            # prove the signature verifies with the published public key
+            mkdir -p /tmp/vk && cp out/luci-app-modem-monitor.pem /tmp/vk/
+            /tmp/apk-tools/build/src/apk verify --keys-dir /tmp/vk out/*.apk
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: luci-app-modem-monitor-apk
-          path: out/*.apk
+          path: |
+            out/*.apk
+            out/*.pem
 
       - name: Publish release (new VERSION on main, or a v* tag)
         if: github.event_name == 'push'
@@ -79,4 +108,7 @@ jobs:
           else
             awk -v v="## $VER" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
           fi
-          gh release create "$TAG" out/*.apk --title "$TAG" --notes-file notes.md --target "$GITHUB_SHA"
+          if [ ! -f out/luci-app-modem-monitor.pem ] && grep -q '^SIGNED_RELEASES=1' build.sh; then
+            echo "APK_SIGN_KEY secret missing: refusing to publish an unsigned release"; exit 1
+          fi
+          gh release create "$TAG" out/*.apk $(ls out/*.pem 2>/dev/null) --title "$TAG" --notes-file notes.md --target "$GITHUB_SHA"

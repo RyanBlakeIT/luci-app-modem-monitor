@@ -2,7 +2,10 @@
 # Build an OpenWrt apk package (OpenWrt 25.x+) with apk-tools v3 ("apk mkpkg").
 #   ./build.sh                      -> out/luci-app-modem-monitor-<version>-r<release>.apk
 #   APK=/path/to/apk RELEASE=2 MAINTAINER="Name <mail>" URL=https://github.com/you/repo ./build.sh
+#   SIGN_KEY=/path/to/private.pem ./build.sh   -> signed package (ECDSA prime256v1 key)
 set -e
+# Releases from CI must be signed from 1.4.0 on (checked by the workflow).
+SIGNED_RELEASES=1
 cd "$(dirname "$0")"
 APK=${APK:-apk}
 RELEASE=${RELEASE:-1}
@@ -13,7 +16,10 @@ mkdir -p root/lib/apk/packages
 echo /etc/config/modem_monitor > root/lib/apk/packages/luci-app-modem-monitor.conffiles
 (cd root && find . -type f -o -type l | sed 's#^\.##' | grep -v '^/lib/apk/' | sort) > root/lib/apk/packages/luci-app-modem-monitor.list
 mkdir -p out
-$APK mkpkg \
+SIGN=""
+[ -n "$SIGN_KEY" ] && SIGN="--sign-key $SIGN_KEY"
+# shellcheck disable=SC2086
+$APK mkpkg $SIGN \
  --info "name:luci-app-modem-monitor" --info "version:$VER" \
  --info "description:Cable modem signal monitor with LuCI report, maintenance log and data export" \
  --info "arch:noarch" --info "license:MIT" --info "origin:luci-app-modem-monitor" \

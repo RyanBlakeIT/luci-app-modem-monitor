@@ -29,7 +29,8 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 
 | | Tested | Notes |
 | --- | --- | --- |
-| Modem | Arris SURFboard S33 (hardware 1.0, firmware TB01.03.001.11) | Uses the HNAP JSON API behind the S33 web UI, with HTTPS/HTTP and HMAC-SHA256/MD5 auto-detected. Other Arris/CommScope SURFboard models with the same web UI may work but are untested; please open an issue with `modem-monitor test --raw` output. |
+| Modem | Arris SURFboard S33 (hardware 1.0, firmware TB01.03.001.11) | Tested on the S33: HNAP JSON API, HTTPS/HTTP and HMAC-SHA256/MD5 auto-detected. |
+| Other modems | Built from published page layouts, not yet tested on hardware | **S34** (same HNAP API as the S33). **SB8200, SB6183, SB6190** (HTML status pages, including the SB8200 login). **Netgear CM600–CM3000** (`DocsisStatus.htm`; event log not read yet; newer firmware with a login form isn't supported). The type is auto-detected; set it under Settings if detection guesses wrong. Rebooting from the router works on S33/S34 only. Please open an issue with `modem-monitor test --raw` output for any model. |
 | OpenWrt | 25.12 (apk) | The `.apk` release targets OpenWrt 25.x. For 24.10 or older (opkg), build an `.ipk` with the SDK and the included `Makefile`. |
 | Packages | `python3`, `luci-base`, `rpcd-mod-file`, `ca-bundle` | `python3` needs about 15–20 MB. |
 | Storage | — | About 2–4 MB of CSV per month. Use USB/SSD storage on routers with small flash. |
@@ -39,13 +40,16 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 Download the latest `.apk` from [Releases](https://github.com/RyanBlakeIT/luci-app-modem-monitor/releases), then:
 
 ```sh
-scp -O luci-app-modem-monitor-1.1.4-r1.apk root@192.168.1.1:/tmp/
+scp -O luci-app-modem-monitor-1.4.0-r1.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1
 apk update
-apk add --allow-untrusted /tmp/luci-app-modem-monitor-1.1.4-r1.apk
+# trust the project's signing key (published with every release)
+wget -O /etc/apk/keys/luci-app-modem-monitor.pem \
+  https://github.com/RyanBlakeIT/luci-app-modem-monitor/releases/latest/download/luci-app-modem-monitor.pem
+apk add /tmp/luci-app-modem-monitor-1.4.0-r1.apk
 ```
 
-The package is not signed by OpenWrt, so `--allow-untrusted` is needed.
+Releases from 1.4.0 on are signed. The package installs the public key itself, so after the first install every in-browser update is checked against it, and an update with a missing or wrong signature is refused. If you skip the `wget` step, install the first time with `apk add --allow-untrusted`.
 
 Then, in LuCI, go to **Status → Cable Modem → Settings**:
 
@@ -70,6 +74,8 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 | `report_interval` | `900` | Seconds between report rebuilds |
 | `data_dir` | auto (see Install) | CSV history (persistent storage) |
 | `retention_days` | auto: 400 / 180 / 90 | History older than this is deleted |
+| `modem_type` | `auto` | `auto`, `s33` (S33/S34), `arris_html` (SB8200/SB6183/SB6190), `netgear` |
+| `compress_old` | `1` | gzip monthly files older than last month |
 | `wan_device` | *(auto)* | Modem-facing port; auto = device of the `wan` interface |
 | `modem_route` | `host` | How the router reaches the modem: `host` route, `alias` address, or `off` |
 | `modem_alias_ip` | `192.168.100.10` | Address used in `alias` mode |
@@ -110,6 +116,7 @@ modem-monitor maint-confirm ID | maint-del ID
 modem-monitor maint-import FILE.csv         # columns: time,end_time,type,note[,source]
 modem-monitor summary [--from YYYY-MM-DD] [--to YYYY-MM-DD]   # printable complaint summary (default: last 30 days)
 modem-monitor alert-test                    # send a test notification to every configured channel
+modem-monitor compress                      # gzip monthly files older than last month (also daily)
 modem-monitor export [--full]               # one .zip; --full keeps MAC/public IP addresses
 modem-monitor update-check [--json]         # is a newer release on GitHub?
 modem-monitor update-install                # download (verified) and install it
