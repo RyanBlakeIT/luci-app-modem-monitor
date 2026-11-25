@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.2
+- "Show data since" for entries without an end time now starts at the first two clean samples afterwards (modem reachable, no reboot or re-registration, no packet loss). For a modem reboot it starts after the sample that sees the reboot. The disruption of the work itself is no longer counted, and the banner shows the exact start time.
+- Releases are created automatically by GitHub Actions when `VERSION` changes on `main`.
+
 ## 1.1.1
 - First install picks the storage location and retention automatically (largest persistent mount with 512 MB or more free, else `/root`; 400, 180 or 90 days by free space). Existing configs and data are never changed.
 

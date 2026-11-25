@@ -54,19 +54,22 @@ jobs:
           name: luci-app-modem-monitor-apk
           path: out/*.apk
 
-      - name: Publish release (version tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish release (new VERSION on main, or a v* tag)
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          VER="${TAG#v}"
-          SCRIPT_VER=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' root/usr/bin/modem-monitor)
-          [ "$VER" = "$SCRIPT_VER" ] || { echo "tag $TAG does not match VERSION $SCRIPT_VER"; exit 1; }
+          VER=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' root/usr/bin/modem-monitor)
+          TAG="v$VER"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "$TAG" ]; then
+            echo "tag $GITHUB_REF_NAME does not match VERSION $VER"; exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; nothing to publish."; exit 0
+          fi
           if [ -f ".github/release-notes/$TAG.md" ]; then
             cp ".github/release-notes/$TAG.md" notes.md
           else
             awk -v v="## $VER" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
           fi
-          gh release create "$TAG" out/*.apk --title "$TAG" --notes-file notes.md \
-            || gh release upload "$TAG" out/*.apk --clobber
+          gh release create "$TAG" out/*.apk --title "$TAG" --notes-file notes.md --target "$GITHUB_SHA"

@@ -40,7 +40,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1251,12 +1251,32 @@ def build_report(cfg):
                 "uncorr_day": round(unc * 24 / hrs) if hrs >= 1 else None, "hours": round(hrs, 1),
                 "t3t4": sum(1 for e in ev if e["type"] in ("T3", "T4")),
                 "drw": sum(1 for e in ev if e["type"] == "DRW")}
+    def settled_after(t, mtype=""):
+        """First healthy sample at/after t that is followed by another healthy one:
+        modem reachable, no reboot/re-registration, no packet loss. Used as the
+        start of 'show data since' for entries without an end time, so the
+        disruption of the work itself (a reboot, a re-registration) is excluded.
+        Searches up to an hour; falls back to t."""
+        cand = [r for r in summ if t < int(r["ts"]) <= t + 3600]
+        if mtype == "modem-reboot":
+            # a sample taken seconds after the command can still see the old uptime:
+            # start only after the sample that saw the reboot, if there is one
+            hit = [i for i, r in enumerate(cand) if r["_reb"] and int(r["ts"]) <= t + 1800]
+            if hit:
+                cand = cand[hit[0] + 1:]
+        ok = lambda r: (r.get("ok") == "1" and not r["_reb"] and not r["_rel"]
+                        and (fv(r, "ping_loss") or 0) == 0)
+        for i, r in enumerate(cand):
+            if ok(r) and i + 1 < len(cand) and ok(cand[i + 1]):
+                return int(r["ts"])
+        return t
     mrows = sorted(load_maint(cfg), key=lambda r: int(r["ts"]))
     maint = []
     for i, r in enumerate(mrows, 1):
         t0 = int(r["ts"])
         t1 = int(r["end_ts"]) if r.get("end_ts") else t0
-        maint.append({"n": i, "id": r["id"], "ts": t0, "end": t1 if t1 > t0 else None,
+        since = t1 if t1 > t0 else settled_after(t0, r["type"])
+        maint.append({"n": i, "id": r["id"], "ts": t0, "end": t1 if t1 > t0 else None, "since": since,
                       "time": r["time"][:16], "end_time": r.get("end_time", "")[:16], "type": r["type"],
                       "note": r["note"], "source": r["source"], "status": r["status"],
                       "before": window(t0 - 86400, t0), "after": window(t1, t1 + 86400)})
@@ -1362,7 +1382,8 @@ const $=s=>document.querySelector(s),esc=s=>String(s??"").replace(/[&<>"]/g,c=>(
 const T=D.thresholds;let R=localStorage&&(()=>{try{return localStorage.getItem("mm-range")}catch(e){return null}})()||"7d";
 if(!D.ranges[R])R="7d";
 const ls=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}};
-const startOfEntry=m=>m.end||m.ts;
+const startOfEntry=m=>m.since||m.end||m.ts;
+const hm=t=>new Date(t*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
 let SINCE=+(ls("mm-since")||0);if(SINCE&&!(D.maint||[]).some(m=>startOfEntry(m)===SINCE))SINCE=0;
 {const t=D.title||("Cable modem signal report"+(D.isp?" \u2013 "+D.isp:""));document.title=t;$("#h1").textContent=t;
  if(D.note){const n=document.createElement("div");n.className="sub";n.style.marginBottom="2px";n.textContent=D.note;$("#h1").after(n)}}
@@ -1442,7 +1463,7 @@ function tiles(rg){const t=count(Math.max(D.now-rg.span,SINCE||0)),u=T.us_power_
 function sinceUI(){const M=(D.maint||[]).slice().reverse();
  $("#since").innerHTML="<option value='0'>All data</option>"+M.map(m=>"<option value='"+startOfEntry(m)+"'"+(startOfEntry(m)===SINCE?" selected":"")+">after #"+m.n+" "+esc(m.type)+" \u2013 "+esc(m.note.length>48?m.note.slice(0,48)+"\u2026":m.note)+" ("+esc((m.end_time||m.time).slice(5,16))+")</option>").join("");
  const b=$("#sinceBanner"),m=M.find(x=>startOfEntry(x)===SINCE);
- if(m){b.style.display="block";b.innerHTML="Showing only data after <b>#"+m.n+" "+esc(m.type)+"</b> ("+esc(m.end_time||m.time)+"): "+esc(m.note)+". Counts, charts and tables start there. <a id=sinceClear>Show all data</a>";$("#sinceClear").onclick=()=>setSince(0)}
+ if(m){b.style.display="block";b.innerHTML="Showing only data after <b>#"+m.n+" "+esc(m.type)+"</b> ("+esc(m.end_time||m.time)+"): "+esc(m.note)+". Counts, charts and tables start at <b>"+hm(SINCE)+"</b>"+(m.end?" (when it ended)":(SINCE>m.ts?" (the first clean samples after it, so the "+(m.type==="modem-reboot"?"reboot":"work")+" itself isn\u2019t counted)":""))+". <a id=sinceClear>Show all data</a>";$("#sinceClear").onclick=()=>setSince(0)}
  else{b.style.display="none";b.innerHTML=""}}
 function setSince(v){SINCE=+v||0;ls("mm-since",String(SINCE));sinceUI();render();tables()}
 function render(){const rg=D.ranges[R];$("#rng").innerHTML=Object.keys(D.ranges).map(k=>"<button aria-pressed="+(k===R)+" data-r="+k+">"+k+"</button>").join("");
