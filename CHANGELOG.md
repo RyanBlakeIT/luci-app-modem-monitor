@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.6.7
+- Speed tests recorded before 1.6.5 with a refused download now count as failed downloads ("no data moved"), not 0 Mb/s results, on the report, the Settings list and in the complaint summary, so they no longer pull down medians or count as "below plan".
+
 ## 1.6.6
 - **Speed test downloads work with Cloudflare's request limits.** Cloudflare refuses single requests near 100 MB, and from some connections much smaller ones (HTTP 403). Each stream now makes repeated 25 MB requests and halves the size on a refusal, down to 1 MB, so the test fills its time window at any speed.
 - **Data limit is exact:** parallel streams reserve their share before requesting, so a 150 MB limit transfers 150 MB, not up to 4x that.

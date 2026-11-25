@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.6.6"
+VERSION = "1.6.7"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1928,7 +1928,7 @@ def build_report(cfg):
     data["traces"] = read_traces(cfg, now - 30 * 86400)
     data["hires_on"] = cfg.get("hires_ping", "0") == "1" or any(fv(r, "hr_sent") for r in summ)
     data["probe"] = load_state(cfg).get("probe") if data["hires_on"] else None
-    sp = read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], now - 90 * 86400)
+    sp = speed_rows(cfg, now - 90 * 86400)
     data["speed"] = [[int(r["ts"]), fv(r, "down_mbps"), fv(r, "up_mbps"), fv(r, "idle_ms"), fv(r, "loaded_ms"), r.get("error", "")]
                      for r in sp]
     # plan speeds are Mb/s; ignore values that can't be (e.g. kb/s typed by mistake)
@@ -3522,6 +3522,22 @@ def backup_due(cfg, st, now):
 # Speed tests (optional; uses data)
 # --------------------------------------------------------------------------
 
+def speed_rows(cfg, since, hi=None):
+    """Speed test history. Directions that moved under 1 MB (refused downloads
+    recorded as 0 Mb/s by versions before 1.6.5) are failed tests, not speeds."""
+    out = []
+    for r in read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], since):
+        if hi is not None and int(r["ts"]) >= hi:
+            continue
+        for d in ("down", "up"):
+            mb = fv(r, d + "_mb")
+            if mb is not None and mb < 1:
+                r[d + "_mbps"], r[d + "_mb"] = "", ""
+                r["error"] = (r.get("error") or "%s failed (no data moved)" % ("download" if d == "down" else "upload"))
+        out.append(r)
+    return out
+
+
 SPEED_COLS = ["ts", "time", "down_mbps", "up_mbps", "idle_ms", "loaded_ms", "down_mb", "up_mb", "server", "error"]
 
 
@@ -3902,8 +3918,8 @@ def complaint_summary(cfg, d_from, d_to, exclude_work=True):
                 "gw_on": any(fv(r, "gw_loss") is not None for r in summ),
                 "both_loss": sum(1 for r in summ if (fv(r, "gw_loss") or 0) > 0 and (fv(r, "ping_loss") or 0) > 0),
                 "traces": len(read_traces(cfg, lo, 1000)),
-                "speed": [[fv(r, "down_mbps"), fv(r, "up_mbps")] for r in read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], lo)
-                          if int(r["ts"]) < hi and not r.get("error")],
+                "speed": [[fv(r, "down_mbps"), fv(r, "up_mbps")] for r in speed_rows(cfg, lo, hi)
+                          if fv(r, "down_mbps") is not None or fv(r, "up_mbps") is not None],
                 "plan": [fnum(cfg, "plan_down") or None, fnum(cfg, "plan_up") or None],
                 "hires_on": any(fv(r, "hr_sent") for r in summ),
                 "drops": int(sum(fv(r, "hr_drops") or 0 for r in summ)),
@@ -4678,7 +4694,7 @@ def main():
             sys.exit(1)
         save_state(cfg, st)
     elif cmd == "speedtest" and "--last" in args:
-        rows = read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], 0)[-5:]
+        rows = speed_rows(cfg, 0)[-5:]
         st = load_state(cfg)
         nxt = None
         if cfg.get("speedtest_enabled", "0") == "1":
