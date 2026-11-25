@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT, ALGO, PASSWORD = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 H = lambda k, m: hmac.new(k.encode(), m.encode(), getattr(hashlib, ALGO)).hexdigest().upper()
-S = {"offset": 3 * 86400, "challenge": None, "pub": None, "uid": None, "pk": None, "boot": time.time(), "unc": 0, "t3": 0}
+S = {"offset": 3 * 86400, "challenge": None, "pub": None, "uid": None, "pk": None, "boot": time.time(), "unc": 0, "t3": 0, "ing": {}}
 LOG = []
 
 
@@ -15,7 +15,7 @@ def ds():
         S["unc"] += random.choice([0, 0, 0, 3, 12])
         rows.append("%d^Locked^QAM256^%d^%d^%.1f^%.1f^%d^%d^" % (
             i, i + 4, 489000000 + i * 6000000, random.uniform(-2, 4), random.uniform(37, 41),
-            random.randint(100, 9000), S["unc"] // 32 + i))
+            random.randint(100, 9000), S["unc"] // 32 + i + S["ing"].get(i, 0)))
     rows.append("33^Locked^OFDM PLC^193^957000000^2.1^40.0^123456^42^")
     return "|+|".join(rows)
 
@@ -47,9 +47,13 @@ class Hd(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def do_GET(self):  # test hooks: /_relock resets counters (no reboot), /_lastset shows last Set
+    def do_GET(self):  # test hooks: /_relock resets counters (no reboot), /_ingress, /_lastset
         if self.path == "/_relock":
             S["unc"] = 0
+            return self.send({"ok": 1})
+        if self.path == "/_ingress":  # burst of errors on channels 5-7 (adjacent frequencies)
+            for i in (5, 6, 7):
+                S["ing"][i] = S["ing"].get(i, 0) + 8000
             return self.send({"ok": 1})
         if self.path == "/_lastset":
             return self.send(S.get("last_set") or {})
@@ -82,7 +86,7 @@ class Hd(BaseHTTPRequestHandler):
             a = body["SetArrisConfigurationInfo"]
             S["last_set"] = a
             if a.get("Action") == "reboot":
-                S["boot"] = time.time(); S["unc"] = 0; S["offset"] = 0
+                S["boot"] = time.time(); S["unc"] = 0; S["offset"] = 0; S["ing"] = {}
             return self.send({"SetArrisConfigurationInfoResponse": {"SetArrisConfigurationInfoResult": "OK"}})
         out = {"GetMultipleHNAPsResult": "OK"}
         for a in body["GetMultipleHNAPs"]:

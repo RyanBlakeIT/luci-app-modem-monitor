@@ -19,6 +19,9 @@ Commands:
   modem-monitor update-check [--json] [--cached]   is a newer release on GitHub?
   modem-monitor update-install   download (verified) and install the newer release
   modem-monitor update-status    progress of a running install (JSON)
+  modem-monitor summary [--from YYYY-MM-DD] [--to YYYY-MM-DD]
+                         one-page printable summary for a complaint (default: last 30 days)
+  modem-monitor alert-test   send a test notification to every configured alert channel
   modem-monitor export   bundle all data + diagnostics into one .zip
                          (MAC/public IP addresses masked; --full keeps them)
 
@@ -33,6 +36,7 @@ import hmac
 import json
 import os
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -43,7 +47,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.1.4"
+VERSION = "1.2.0"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -76,6 +80,23 @@ DEFAULTS = {
     # read live from the modem first, these are only the fallback.
     "modem_eee": "0",
     "modem_led": "1",
+    # Alerts: off until a channel is configured and alert_enabled=1
+    "alert_enabled": "0",
+    "alert_on": "outage reboot relock t3t4 uncorr us_power loss",
+    "alert_ntfy_url": "",       # https://ntfy.sh/<topic>, a self-hosted URL, or just a topic name
+    "alert_ntfy_token": "",
+    "alert_pushover_user": "",
+    "alert_pushover_token": "",
+    "alert_telegram_token": "",
+    "alert_telegram_chat": "",
+    "alert_webhook_url": "",    # receives a JSON POST
+    "alert_email_to": "",       # needs a working sendmail (e.g. msmtp)
+    "alert_email_from": "",
+    "alert_t3t4_count": "3",    # T3/T4 timeouts within an hour
+    "alert_uncorr": "5000",     # uncorrectables in one sample
+    "alert_loss": "20",         # % packet loss in one sample
+    "alert_outage_polls": "2",  # failed samples in a row before "unreachable"
+    "alert_cooldown_min": "60", # per alert type
 }
 
 LOGIN_BACKOFF_S = 1800  # after a failed login, wait 30 min (avoid modem lockout)
@@ -111,8 +132,11 @@ def load_config():
         m = re.match(r"modem_monitor\.main\.(\w+)=(.*)$", line)
         if m:
             v = m.group(2)
-            if len(v) >= 2 and v[0] == v[-1] == "'":
-                v = v[1:-1].replace("'\\''", "'")
+            try:
+                v = " ".join(shlex.split(v))  # handles 'a' and list values 'a' 'b'
+            except ValueError:
+                if len(v) >= 2 and v[0] == v[-1] == "'":
+                    v = v[1:-1].replace("'\\''", "'")
             cfg[m.group(1)] = v
     return cfg
 
@@ -958,6 +982,7 @@ def poll(cfg):
 
     modem = S33(cfg, st)
     events_new = []
+    chd, chinfo = {}, {}
     try:
         resp = modem.call(["GetCustomerStatusDownstreamChannelInfo",
                            "GetCustomerStatusUpstreamChannelInfo",
@@ -1034,6 +1059,14 @@ def poll(cfg):
                                "snr": c.get("snr", ""), "corr": c.get("corr", ""),
                                "uncorr": c.get("uncorr", "")})
         append_csv(month_file(cfg, "channels", now), CHANNEL_COLS, chrows)
+        prevch = st.get("last_ch_unc", {})
+        for c in ds:
+            k = str(c["ch"])
+            if k in prevch and not rebooted:
+                chd[k] = c["uncorr"] - prevch[k] if c["uncorr"] >= prevch[k] else c["uncorr"]
+            if c["freq"]:
+                chinfo[k] = {"freq": c["freq"], "ofdm": _is_ofdm(c["mod"])}
+        st["last_ch_unc"] = {str(c["ch"]): c["uncorr"] for c in ds}
 
         # Event log (separate request; some firmware may not support it)
         try:
@@ -1076,6 +1109,11 @@ def poll(cfg):
         auto_suggest(cfg, st, row, now, row.get("uptime_s") if row.get("uptime_s") != "" else None, events_new)
     except Exception as e:
         log("auto-suggest error: %r" % e)
+
+    try:
+        alert_check(cfg, st, row, events_new, chd, chinfo, now)
+    except Exception as e:
+        log("alert error: %r" % e)
 
     append_csv(month_file(cfg, "summary", now), SUMMARY_COLS, [row])
     if events_new:
@@ -1190,18 +1228,7 @@ def build_report(cfg):
 
     us_ids = sorted({r["ch"] for r in chans}, key=lambda x: (num(x) or 0, x))[:8]
 
-    # Reboot = uptime went backwards; re-registration = counters reset (or the
-    # modem logged registration trouble) while uptime kept counting. Derived from
-    # history so rows written by older versions are classified the same way.
-    prev_up = None
-    for r in summ:
-        up = fv(r, "uptime_s")
-        stored = r.get("rebooted") == "1"
-        reb = (up + 120 < prev_up) if (up is not None and prev_up is not None) else stored
-        r["_reb"] = reb
-        r["_rel"] = (r.get("relock") == "1" or stored) and not reb
-        if up is not None:
-            prev_up = up
+    mark_reboots(summ)  # derived from history so old rows are classified the same way
     # Link counters: recomputed from the cumulative columns. Cable/port errors and
     # NIC receive overruns (rx_missed: router CPU/buffer) are kept apart.
     prevl = {}
@@ -1256,6 +1283,19 @@ def build_report(cfg):
         }
         data["ranges"][name] = {"bucket": b, "series": series, "tiles": tiles, "span": span}
 
+    # Downstream errors per channel: heatmap per range + daily ingress check
+    try:
+        specs = {"24h": (now - 86400, 3600), "7d": (now - 7 * 86400, 4 * 3600),
+                 "30d": (now - 30 * 86400, 86400)}
+        chm, chinfo = channel_uncorr(cfg, specs)
+        for name, (lo, size) in specs.items():
+            if name in data["ranges"]:
+                data["ranges"][name]["heat"] = heat_matrix(chm.get(name, {}), chinfo, lo, size, now)
+        data["ingress"] = ingress_findings(chm.get("30d", {}), chinfo)
+    except Exception as e:
+        log("channel analysis error: %r" % e)
+        data["ingress"] = []
+
     # Daily table (30 days)
     days = {}
     for i in range(30):
@@ -1307,20 +1347,7 @@ def build_report(cfg):
     data.pop("days", None)  # the page builds the daily table itself (see "samples")
 
     # Outages: consecutive failed polls or 100% loss, grouped
-    outs, cur = [], None
-    for r in summ:
-        bad = modem_down(r) or (fv(r, "ping_loss") or 0) >= 100
-        t = int(r["ts"])
-        if bad:
-            why = r.get("error") or "100% packet loss"
-            if cur and t - cur["end"] <= interval * 2 + 60:
-                cur["end"] = t
-                cur["polls"] += 1
-            else:
-                cur = {"start": t, "end": t, "polls": 1, "why": why}
-                outs.append(cur)
-        else:
-            cur = None
+    outs = group_outages(summ, interval)
     for r in summ:
         if r["_reb"]:
             outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0, "why": "Modem rebooted (uptime reset)"})
@@ -1480,6 +1507,10 @@ select#since{font:inherit;padding:5px 8px;border:1px solid var(--border);border-
 .stale{margin-top:8px;color:var(--critical);font-weight:600;font-size:13px}
 .section{margin-top:14px}.empty{color:var(--text-muted);padding:20px 4px}
 a{color:var(--s1)}
+.hm-leg{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);margin:6px 0}
+.hm-leg span.g{display:inline-block;width:120px;height:10px;border-radius:2px;background:linear-gradient(90deg,color-mix(in srgb,var(--s1) 12%,var(--surface-1)),var(--s1))}
+.ing{margin:8px 0 4px;padding:8px 12px;border-radius:8px;border:1px solid var(--border);border-left:3px solid var(--critical);font-size:13px}
+.ing.ok{border-left-color:var(--good)}.ing ul{margin:4px 0 0;padding-left:18px}
 details summary{cursor:pointer;color:var(--text-secondary);font-size:13px;margin:4px 0}
 </style></head>
 <body><div class="viz-root">
@@ -1490,6 +1521,7 @@ details summary{cursor:pointer;color:var(--text-secondary);font-size:13px;margin
 <div class="tiles" id="tiles"></div>
 <div class="mk" id="mk"></div>
 <div class="grid" id="charts"></div>
+<div class="card section" id="heatCard"><h2>Downstream errors by channel</h2><div class="sub">Uncorrectable codewords per downstream channel (rows, by frequency) over time (columns). Darker = more errors. Errors confined to a few adjacent rows usually mean <b>RF ingress</b>: an outside signal leaking into the cable through a damaged line, loose connector or bad tap. Errors across every row point to wideband noise or weak signal.</div><div id="ingress"></div><div id="heat"></div></div>
 <div class="card section"><h2>Maintenance log</h2><div class="sub">Repairs, calls, reboots and router changes, numbered to match the dashed markers on the charts. "Before" and "after" are the 24 hours on each side (median power range, uncorrectables per day, T3/T4 timeouts, upstream power warnings). Add or edit entries on the router's <b>Maintenance Log</b> tab or with <code>modem-monitor mark</code>.</div><div class="scroll"><table id="maint"></table></div></div>
 <div class="card section"><h2 id="daysTitle">Daily summary (last 30 days)</h2><div class="sub">Counts from the modem event log and from this router's polls. Rows with trouble are marked.</div><div class="scroll"><table id="days"></table></div></div>
 <div class="card section"><h2>Incidents</h2><div class="sub">Times the modem couldn't be reached, pings failed completely, or the modem rebooted.</div><div class="scroll"><table id="inc"></table></div></div>
@@ -1590,7 +1622,29 @@ function setSince(id){SID=String(id||"");ls("mm-since-id",SID);SINCE=ENT()?start
 function render(){const rg=D.ranges[R];$("#rng").innerHTML=Object.keys(D.ranges).map(k=>"<button aria-pressed="+(k===R)+" data-r="+k+">"+k+"</button>").join("");
  tiles(rg);const g=$("#charts");g.innerHTML="";
  const mk=(D.maint||[]).filter(m=>(m.end||m.ts)>=Math.max(D.now-rg.span,SINCE||0)).length;$("#mk").textContent=mk?"Dashed lines on the charts mark "+mk+" maintenance log entr"+(mk===1?"y":"ies")+" (numbers match the Maintenance log below). Hover a chart for details.":"";
- CH.forEach(c=>g.appendChild(chart(c,rg)))}
+ CH.forEach(c=>g.appendChild(chart(c,rg)));heat(rg)}
+function heat(rg){const H=rg.heat,el=$("#heat"),lo=Math.max(D.now-rg.span,SINCE||0);
+ const ING=(D.ingress||[]).filter(i=>i.ts+86400>lo&&i.ts>=D.now-rg.span-86400);
+ const nar=ING.filter(i=>i.kind==="narrow"),wid=ING.filter(i=>i.kind==="wide");
+ $("#ingress").innerHTML=(!ING.length)?"<div class='ing ok'>No day in this range had 1,000+ uncorrectables, so there is no error pattern to judge.</div>":
+  "<div class=ing>"+(nar.length?"<b>Likely ingress on "+nar.length+" day"+(nar.length===1?"":"s")+"</b>: most errors were on 3 adjacent channels.<ul>"+nar.slice().reverse().map(i=>"<li>"+i.day+": <b>"+i.share+"%</b> of "+i.total.toLocaleString()+" on "+i.fmin+"–"+i.fmax+" MHz (ch "+i.chs.map(esc).join(", ")+")"+(i.ofdm?"; "+i.ofdm.toLocaleString()+" on OFDM":"")+"</li>").join("")+"</ul>":"")+
+  (wid.length?(nar.length?"<div style='margin-top:6px'>":"<div>")+"<b>Spread across the band</b> on "+wid.map(i=>i.day+" ("+i.total.toLocaleString()+")").join(", ")+".</div>":"")+"</div>";
+ if(!H||!H.rows.length){el.innerHTML="<div class=empty>No per-channel data yet.</div>";return}
+ const ci=H.cols.map((c,i)=>c+H.size>lo?i:-1).filter(i=>i>=0);if(!ci.length){el.innerHTML="<div class=empty>No data in this period.</div>";return}
+ const rows=H.rows,mx=Math.max(1,...H.v.flatMap(r=>ci.map(i=>r[i]))),lg=v=>v>0?Math.log10(v+1)/Math.log10(mx+1):0;
+ const W=1000,Lp=118,rh=Math.max(7,Math.min(14,Math.floor(420/rows.length))),Tp=4,B=20,Hh=Tp+rows.length*rh+B,cw=(W-Lp-4)/ci.length;
+ let g="<div class=hm-leg>0<span class=g></span>"+mx.toLocaleString()+" per "+(H.size>=86400?"day":H.size/3600+" h")+" (log scale)</div><svg viewBox='0 0 "+W+" "+Hh+"' role=img aria-label='Uncorrectable codewords per channel and time'>";
+ rows.forEach((r,j)=>{const y=Tp+j*rh;if(rows.length<=40||j%2===0)g+="<text class=axis x="+(Lp-6)+" y="+(y+rh-2)+" text-anchor=end font-size=10 fill='var(--text-muted)'>"+(r.ofdm?"OFDM ":"")+r.freq+" MHz"+"</text>";
+  ci.forEach((i,k)=>{const v=H.v[j][i];g+="<rect x="+(Lp+k*cw).toFixed(1)+" y="+y+" width="+Math.max(1,cw-1).toFixed(1)+" height="+(rh-1)+" rx=1 fill='"+(v>0?"color-mix(in srgb,var(--s1) "+Math.round(12+88*lg(v))+"%,var(--surface-1))":"var(--grid)")+"'/>"})});
+ const nx=Math.min(5,ci.length-1);for(let q=0;q<=nx;q++){const k=nx?Math.round(q*(ci.length-1)/nx):0;g+="<text x="+(Lp+k*cw+cw/2).toFixed(1)+" y="+(Hh-5)+" text-anchor=middle font-size=10 fill='var(--text-muted)'>"+esc(fmtT(H.cols[ci[k]],rg.span))+"</text>"}
+ g+="<rect class=hit x="+Lp+" y="+Tp+" width="+(W-Lp-4)+" height="+(rows.length*rh)+" fill=transparent /></svg><div class=tip></div>";
+ el.innerHTML=g;const svg=el.querySelector("svg"),tip=el.querySelector(".tip"),card=$("#heatCard");
+ svg.addEventListener("mousemove",e=>{const b=svg.getBoundingClientRect(),sx=(e.clientX-b.left)*W/b.width,sy=(e.clientY-b.top)*Hh/b.height;const k=Math.floor((sx-Lp)/cw),j=Math.floor((sy-Tp)/rh);
+  if(k<0||k>=ci.length||j<0||j>=rows.length){tip.style.display="none";return}const r=rows[j],t=H.cols[ci[k]],v=H.v[j][ci[k]];
+  tip.innerHTML="<div class=sub>"+fmtFull(t)+" (+"+(H.size>=86400?"1 day":H.size/3600+" h")+")</div><div>"+(r.ofdm?"OFDM ":"Ch "+esc(r.ch)+" · ")+r.freq+" MHz: <b>"+v.toLocaleString()+"</b> uncorrectables</div>";tip.style.display="block";
+  const cr=card.getBoundingClientRect();let lx=e.clientX-cr.left+12;if(lx+tip.offsetWidth>cr.width)lx=e.clientX-cr.left-tip.offsetWidth-12;tip.style.left=lx+"px";tip.style.top=(e.clientY-cr.top+12)+"px"});
+ svg.addEventListener("mouseleave",()=>{tip.style.display="none"})}
+
 $("#rng").addEventListener("click",e=>{const r=e.target.dataset.r;if(r){R=r;try{localStorage.setItem("mm-range",r)}catch(x){}render()}});
 $("#since").addEventListener("change",e=>setSince(e.target.value));
 sinceUI();render();
@@ -1615,6 +1669,573 @@ $("#files").innerHTML=D.files.length?"<ul>"+D.files.map(f=>"<li><a href='data/"+
 </script></body></html>
 """
 
+
+# --------------------------------------------------------------------------
+# Per-channel downstream errors: heatmap and ingress detection
+# --------------------------------------------------------------------------
+
+INGRESS_MIN = 1000     # uncorrectables in a day before its pattern is judged
+INGRESS_SHARE = 0.6    # share on 3 adjacent channels that counts as "concentrated"
+
+
+def _is_ofdm(mod):
+    return "ofdm" in (mod or "").lower()
+
+
+def _bstart(t, size, _c={}):
+    """Start of the local-time bucket (size seconds; >= 1 day means local midnight)."""
+    k = (t, size)
+    if k in _c:
+        return _c[k]
+    lt = time.localtime(t)
+    if size >= 86400:
+        b = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+    else:
+        secs = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+        b = t - secs % size
+    if len(_c) > 20000:
+        _c.clear()
+    _c[k] = b
+    return b
+
+
+def channel_uncorr(cfg, specs, hi=None):
+    """Uncorrectable codewords per downstream channel, summed into time buckets.
+    specs: {name: (lo, bucket_s)}. Returns ({name: {ch: {bucket_ts: n}}}, info)
+    where info = {ch: {"freq": MHz, "ofdm": bool}} (latest values seen)."""
+    lo_all = min(s[0] for s in specs.values())
+    out = {n: {} for n in specs}
+    info, prev = {}, {}
+    for p in files_since(cfg, "channels", lo_all - 86400):
+        try:
+            f = open(p, newline="")
+        except OSError:
+            continue
+        with f:
+            for r in csv.DictReader(f):
+                if r.get("dir") != "down":
+                    continue
+                try:
+                    t = int(r["ts"])
+                    u = int(float(r.get("uncorr") or 0))
+                except (ValueError, KeyError, TypeError):
+                    continue
+                ch = r.get("ch", "")
+                fr = num(r.get("freq_mhz"))
+                if fr:
+                    info[ch] = {"freq": fr, "ofdm": _is_ofdm(r.get("mod"))}
+                pu = prev.get(ch)
+                prev[ch] = u
+                if pu is None or (hi is not None and t >= hi):
+                    continue
+                d = u - pu if u >= pu else u  # counters reset on reboot / re-registration
+                if d <= 0:
+                    continue
+                for n, (lo, size) in specs.items():
+                    if t >= lo:
+                        b = _bstart(t, size)
+                        m = out[n].setdefault(ch, {})
+                        m[b] = m.get(b, 0) + d
+    return out, info
+
+
+def concentration(vals, info):
+    """vals: {ch: uncorrectables}. Finds the 3 frequency-adjacent SC-QAM channels
+    with the most errors. Returns None, or {share, chs, fmin, fmax, total, ofdm}."""
+    sc = sorted((c for c in info if not info[c]["ofdm"]), key=lambda c: info[c]["freq"])
+    tot = sum(vals.get(c, 0) for c in sc)
+    if len(sc) < 6 or tot <= 0:
+        return None
+    best, bi = -1, 0
+    for i in range(len(sc) - 2):
+        s = sum(vals.get(c, 0) for c in sc[i:i + 3])
+        if s > best:
+            best, bi = s, i
+    chs = sc[bi:bi + 3]
+    return {"share": best / float(tot), "chs": chs, "fmin": info[chs[0]]["freq"], "fmax": info[chs[-1]]["freq"],
+            "total": tot, "ofdm": sum(vals.get(c, 0) for c in info if info[c]["ofdm"]), "n_sc": len(sc)}
+
+
+def ingress_findings(daily, info, min_total=INGRESS_MIN):
+    """daily: {ch: {day_ts: n}}. One finding per day with enough errors:
+    'narrow' = concentrated on a few adjacent channels (typical of RF ingress),
+    'wide' = spread across the band (wideband noise, low signal, or a CMTS/node issue)."""
+    days = sorted({d for m in daily.values() for d in m})
+    res = []
+    for d in days:
+        c = concentration({ch: m.get(d, 0) for ch, m in daily.items()}, info)
+        if not c or c["total"] < min_total:
+            continue
+        res.append({"day": time.strftime("%Y-%m-%d", time.localtime(d)), "ts": d,
+                    "kind": "narrow" if c["share"] >= INGRESS_SHARE else "wide",
+                    "share": round(c["share"] * 100), "chs": c["chs"], "fmin": c["fmin"], "fmax": c["fmax"],
+                    "total": c["total"], "ofdm": c["ofdm"]})
+    return res
+
+
+def heat_matrix(m, info, lo, size, now):
+    """{ch: {bucket: n}} -> compact matrix for the page, rows sorted by frequency."""
+    cols = []
+    b = _bstart(lo, size)
+    while b <= now:
+        if b + size > lo:
+            cols.append(b)
+        nb = _bstart(b + size + 3600, size) if size >= 86400 else b + size
+        b = nb if nb > b else b + size
+    idx = {c: i for i, c in enumerate(cols)}
+    rows = sorted(info, key=lambda c: (info[c]["ofdm"], info[c]["freq"]))
+    v = []
+    for ch in rows:
+        line = [0] * len(cols)
+        for bt, n in m.get(ch, {}).items():
+            i = idx.get(bt)
+            if i is not None:
+                line[i] += n
+        v.append(line)
+    return {"cols": cols, "size": size,
+            "rows": [{"ch": c, "freq": info[c]["freq"], "ofdm": info[c]["ofdm"]} for c in rows], "v": v}
+
+
+# --------------------------------------------------------------------------
+# Alerts (ntfy, Pushover, Telegram, webhook, email)
+# --------------------------------------------------------------------------
+
+ALERT_KINDS = ["outage", "reboot", "relock", "t3t4", "uncorr", "us_power", "loss"]
+
+
+def _http_post(url, body, headers=None, timeout=15):
+    """POST with certificate verification; falls back to curl if Python's SSL
+    can't be used. Returns the HTTP status (raises on failure)."""
+    cafile = next((c for c in CA_FILES if os.path.exists(c)), None)
+    h = {"User-Agent": "luci-app-modem-monitor/" + VERSION}
+    h.update(headers or {})
+    data = body if isinstance(body, bytes) else body.encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=h, method="POST")
+    try:
+        ctx = ssl.create_default_context(cafile=cafile) if url.startswith("https:") else None
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        raise ModemError("HTTP %d from %s" % (e.code, url.split("?")[0]))
+    except (ssl.SSLError, urllib.error.URLError, OSError) as e:
+        if not shutil.which("curl"):
+            raise ModemError(str(getattr(e, "reason", e)))
+        cmd = ["curl", "-sS", "-f", "-m", str(timeout), "-o", "/dev/null", "-w", "%{http_code}", "--data-binary", "@-"]
+        for k, v in h.items():
+            cmd += ["-H", "%s: %s" % (k, v)]
+        out = subprocess.run(cmd + [url], input=data, capture_output=True, timeout=timeout + 5)
+        if out.returncode != 0:
+            raise ModemError((out.stderr or b"curl failed").decode("utf-8", "replace").strip()[:200])
+        return int(out.stdout or 0)
+
+
+def _hdr(s):
+    """HTTP header values must be latin-1; ntfy accepts RFC 2047 for the rest."""
+    try:
+        s.encode("latin-1")
+        return s
+    except UnicodeEncodeError:
+        import base64
+        return "=?UTF-8?B?%s?=" % base64.b64encode(s.encode("utf-8")).decode()
+
+
+def ntfy_url(v):
+    v = (v or "").strip()
+    if v and "://" not in v:
+        v = "https://ntfy.sh/" + v.lstrip("/")  # just a topic name
+    return v
+
+
+def alert_targets(cfg):
+    g = lambda k: (cfg.get(k) or "").strip()
+    t = []
+    if g("alert_ntfy_url"):
+        t.append("ntfy")
+    if g("alert_pushover_user") and g("alert_pushover_token"):
+        t.append("pushover")
+    if g("alert_telegram_token") and g("alert_telegram_chat"):
+        t.append("telegram")
+    if g("alert_webhook_url"):
+        t.append("webhook")
+    if g("alert_email_to"):
+        t.append("email")
+    return t
+
+
+def send_alert(cfg, title, msg, prio=3, kind="info"):
+    """Send to every configured channel. Returns [(channel, ok, detail)]."""
+    g = lambda k: (cfg.get(k) or "").strip()
+    host = _read("/proc/sys/kernel/hostname") or "router"
+    res = []
+    for ch in alert_targets(cfg):
+        try:
+            if ch == "ntfy":
+                h = {"Title": _hdr(title), "Priority": str(prio), "Tags": "warning" if prio >= 4 else "satellite_antenna"}
+                if g("alert_ntfy_token"):
+                    h["Authorization"] = "Bearer " + g("alert_ntfy_token")
+                _http_post(ntfy_url(g("alert_ntfy_url")), msg, h)
+            elif ch == "pushover":
+                import urllib.parse
+                body = urllib.parse.urlencode({"token": g("alert_pushover_token"), "user": g("alert_pushover_user"),
+                                               "title": title, "message": msg,
+                                               "priority": 1 if prio >= 5 else 0})
+                _http_post("https://api.pushover.net/1/messages.json", body,
+                           {"Content-Type": "application/x-www-form-urlencoded"})
+            elif ch == "telegram":
+                body = json.dumps({"chat_id": g("alert_telegram_chat"), "text": "%s\n%s" % (title, msg),
+                                   "disable_web_page_preview": True})
+                _http_post("https://api.telegram.org/bot%s/sendMessage" % g("alert_telegram_token"), body,
+                           {"Content-Type": "application/json"})
+            elif ch == "webhook":
+                body = json.dumps({"title": title, "message": msg, "kind": kind, "priority": prio,
+                                   "ts": int(time.time()), "host": host, "source": "modem-monitor"})
+                _http_post(g("alert_webhook_url"), body, {"Content-Type": "application/json"})
+            elif ch == "email":
+                sm = shutil.which("sendmail") or ("/usr/sbin/sendmail" if os.path.exists("/usr/sbin/sendmail") else None)
+                if not sm:
+                    raise ModemError("no sendmail found (install msmtp and set it up)")
+                frm = g("alert_email_from") or "modem-monitor@%s" % host
+                m = "From: %s\nTo: %s\nSubject: %s\nContent-Type: text/plain; charset=utf-8\n\n%s\n" % (
+                    frm, g("alert_email_to"), title, msg)
+                out = subprocess.run([sm, "-t"], input=m.encode("utf-8"), capture_output=True, timeout=30)
+                if out.returncode != 0:
+                    raise ModemError((out.stderr or b"sendmail failed").decode("utf-8", "replace").strip()[:200])
+            res.append((ch, True, "sent"))
+        except Exception as e:  # one bad channel must not stop the others
+            res.append((ch, False, str(e)[:200]))
+    return res
+
+
+def alert_check(cfg, st, row, events_new, chd, info, now):
+    """Decide what to alert on after a poll; queue, then try to send the queue.
+    Alerts raised while the line is down are delivered once it is back."""
+    if cfg.get("alert_enabled", "0") != "1" or not alert_targets(cfg):
+        return
+    on = set((cfg.get("alert_on") or " ".join(ALERT_KINDS)).split())
+    A = st.setdefault("alerts", {})
+    last = A.setdefault("last", {})
+    queue = A.setdefault("queue", [])
+    cool = max(0, int(fnum(cfg, "alert_cooldown_min"))) * 60
+    hm = lambda t: time.strftime("%H:%M", time.localtime(t))
+    isp = (cfg.get("isp_name") or "").strip()
+    found = []  # (kind, title, message, priority, bypass_cooldown)
+
+    if row.get("ok") != 1:
+        A["down_since"] = A.get("down_since") or int(now)
+        A["down_polls"] = A.get("down_polls", 0) + 1
+        if A["down_polls"] == max(1, int(fnum(cfg, "alert_outage_polls"))) and "outage" in on:
+            found.append(("outage", "Cable modem unreachable",
+                          "No answer from the modem since %s (%s). Internet is probably down%s." %
+                          (hm(A["down_since"]), row.get("error") or "?", " (%s)" % isp if isp else ""), 5, False))
+            A["down_alerted"] = True
+    else:
+        if A.get("down_alerted"):
+            mins = round((now - A.get("down_since", now)) / 60)
+            found.append(("outage", "Cable modem back online",
+                          "The modem is answering again after about %d minutes (unreachable from %s)." %
+                          (mins, hm(A.get("down_since", now))), 3, True))
+        A["down_since"], A["down_polls"], A["down_alerted"] = None, 0, False
+
+        if row.get("rebooted") == 1 and "reboot" in on:
+            mine = [r for r in load_maint(cfg) if r["type"] == "modem-reboot" and r["source"] == "router"
+                    and now - int(r["ts"]) < 1800]
+            if not mine:
+                found.append(("reboot", "Cable modem rebooted",
+                              "The modem's uptime reset (it rebooted on its own or was rebooted remotely). "
+                              "Downstream %s..%s dBmV, upstream %s..%s dBmV." %
+                              (row.get("ds_power_min"), row.get("ds_power_max"),
+                               row.get("us_power_min"), row.get("us_power_max")), 4, False))
+        if row.get("relock") == 1 and row.get("rebooted") != 1 and "relock" in on:
+            found.append(("relock", "Cable modem re-registered",
+                          "The modem lost signal and re-registered without rebooting.", 4, False))
+
+        hits = A.setdefault("t34", [])
+        hits += [int(e["ts"]) for e in events_new if e["type"] in ("T3", "T4")]
+        hits[:] = [t for t in hits if t > now - 3600][-200:]
+        new34 = [e for e in events_new if e["type"] in ("T3", "T4")]
+        if new34 and len(hits) >= max(1, int(fnum(cfg, "alert_t3t4_count"))) and "t3t4" in on:
+            n3 = sum(1 for e in new34 if e["type"] == "T3")
+            found.append(("t3t4", "Upstream timeouts (T3/T4)",
+                          "%d T3/T4 timeouts in the last hour (%d T3, %d T4 just now). Latest: %s" %
+                          (len(hits), n3, len(new34) - n3, new34[-1]["message"][:160]),
+                          5 if len(new34) > n3 else 4, False))
+
+        unc = row.get("uncorr_delta") or 0
+        if row.get("rebooted") != 1 and unc >= fnum(cfg, "alert_uncorr") and "uncorr" in on:
+            c = concentration(chd, info) if chd else None
+            where = ""
+            if c and c["share"] >= INGRESS_SHARE:
+                where = (" %d%% of them on channels %s (%g-%g MHz): a pattern typical of RF ingress (outside "
+                         "interference leaking into the cable)." % (round(c["share"] * 100), ", ".join(c["chs"]),
+                                                                     c["fmin"], c["fmax"]))
+            elif c:
+                where = " Spread across the band (wideband noise or weak signal)."
+            found.append(("uncorr", "Downstream errors spiking",
+                          "%s uncorrectable codewords in the last sample.%s" % ("{:,}".format(int(unc)), where), 4, False))
+
+        usm = row.get("us_power_max")
+        if usm not in ("", None) and usm > fnum(cfg, "us_power_max") and "us_power" in on:
+            found.append(("us_power", "Upstream power too high",
+                          "Upstream transmit power is %s dBmV (limit %g). The modem is straining to reach the "
+                          "node; T3 timeouts usually follow." % (usm, fnum(cfg, "us_power_max")), 4, False))
+
+    loss = row.get("ping_loss")
+    if loss not in ("", None) and loss >= fnum(cfg, "alert_loss") and row.get("ok") == 1 and "loss" in on:
+        found.append(("loss", "Packet loss", "%g%% packet loss to %s." % (loss, cfg.get("ping_targets", "")), 3, False))
+
+    for kind, title, msg, prio, bypass in found:
+        if not bypass and now - last.get(kind, 0) < cool:
+            continue
+        last[kind] = int(now)
+        queue.append({"ts": int(now), "kind": kind, "title": title, "prio": prio,
+                      "msg": "%s %s" % (time.strftime("%b %d %H:%M", time.localtime(now)), msg)})
+        log("alert: %s: %s" % (title, msg))
+
+    queue[:] = [q for q in queue if now - q["ts"] < 86400][-30:]
+    if not queue or row.get("ok") != 1 or (loss not in ("", None) and loss >= 100):
+        return  # no way out right now; keep them for later
+    keep = []
+    for q in queue:
+        res = send_alert(cfg, q["title"], q["msg"] if now - q["ts"] < 600 else q["msg"] + " (delayed: sent once the line was back)",
+                         q["prio"], q["kind"])
+        if not any(ok for _, ok, _ in res):
+            keep.append(q)
+            log("alert not sent yet: %s" % "; ".join("%s: %s" % (c, d) for c, ok, d in res if not ok))
+    queue[:] = keep
+
+
+def alert_test(cfg):
+    if not alert_targets(cfg):
+        return [("none", False, "no alert channel configured (set an ntfy topic, Pushover, Telegram, webhook or email)")]
+    return send_alert(cfg, "Test alert from the cable modem monitor",
+                      "If you can read this, alerts work. Sent %s from %s." %
+                      (time.strftime("%Y-%m-%d %H:%M"), _read("/proc/sys/kernel/hostname") or "the router"), 3, "test")
+
+
+# --------------------------------------------------------------------------
+# Printable complaint summary for a date range
+# --------------------------------------------------------------------------
+
+def mark_reboots(summ):
+    """Reboot = uptime went backwards; re-registration = counters reset (or the
+    modem logged registration trouble) while uptime kept counting."""
+    prev_up = None
+    for r in summ:
+        up = fv(r, "uptime_s")
+        stored = r.get("rebooted") == "1"
+        reb = (up + 120 < prev_up) if (up is not None and prev_up is not None) else stored
+        r["_reb"] = reb
+        r["_rel"] = (r.get("relock") == "1" or stored) and not reb
+        if up is not None:
+            prev_up = up
+    return summ
+
+
+def group_outages(summ, interval):
+    outs, cur = [], None
+    for r in summ:
+        bad = modem_down(r) or (fv(r, "ping_loss") or 0) >= 100
+        t = int(r["ts"])
+        if bad:
+            why = r.get("error") or "100% packet loss"
+            if cur and t - cur["end"] <= interval * 2 + 60:
+                cur["end"] = t
+                cur["polls"] += 1
+            else:
+                cur = {"start": t, "end": t, "polls": 1, "why": why}
+                outs.append(cur)
+        else:
+            cur = None
+    return outs
+
+
+def _day_ts(s):
+    return int(time.mktime(time.strptime(s, "%Y-%m-%d")))
+
+
+def complaint_summary(cfg, d_from, d_to):
+    lo, hi0 = _day_ts(d_from), _day_ts(d_to)
+    if hi0 < lo:
+        lo, hi0 = hi0, lo
+    hi = _bstart(hi0 + 86400 + 7200, 86400)  # next local midnight (DST-safe)
+    interval = int(fnum(cfg, "interval"))
+    summ = mark_reboots(read_csvs(files_since(cfg, "summary", lo - 86400), lo - 86400))
+    summ = [r for r in summ if lo <= int(r["ts"]) < hi]
+    events = [e for e in read_csvs([os.path.join(cfg["data_dir"], "events.csv")], lo) if int(e["ts"]) < hi]
+    links = [r for r in read_csvs(files_since(cfg, "link", lo - 86400), lo - 86400) if int(r["ts"]) < hi]
+    prevl = {}
+    for r in links:
+        pr = prevl.get(r.get("dev"))
+        tot = lambda x: sum(int(fv(x, k) or 0) for k in LINK_ERR_KEYS)
+        r["_err"] = max(0, tot(r) - tot(pr)) if pr else 0
+        prevl[r.get("dev")] = r
+    links = [r for r in links if int(r["ts"]) >= lo]
+    maint = [r for r in sorted(load_maint(cfg), key=lambda r: int(r["ts"])) if lo <= int(r["ts"]) < hi]
+    ch, info = channel_uncorr(cfg, {"day": (lo, 86400)}, hi=hi)
+    ingress = ingress_findings(ch["day"], info)
+    ing_by_day = {f["day"]: f for f in ingress}
+    st = load_state(cfg)
+    usmax_lim = fnum(cfg, "us_power_max")
+
+    days = []
+    t = lo
+    while t < hi:
+        days.append(time.strftime("%Y-%m-%d", time.localtime(t)))
+        t = _bstart(t + 86400 + 7200, 86400)
+    D = {d: {"day": d, "T3": 0, "T4": 0, "DRW": 0, "REG": 0, "uncorr": 0, "us_max": None, "us_over": 0, "reboots": 0,
+             "relocks": 0, "down": 0, "loss": 0, "polls": 0, "link_err": 0} for d in days}
+    for e in events:
+        x = D.get(e["time"][:10])
+        if not x:
+            continue
+        if e["type"] in ("T3", "T4", "DRW"):
+            x[e["type"]] += 1
+        elif e["type"] in ("SYNC", "PROVISION"):
+            x["REG"] += 1
+    for r in summ:
+        x = D.get(r["time"][:10])
+        if not x:
+            continue
+        x["polls"] += 1
+        x["uncorr"] += int(fv(r, "uncorr_delta") or 0) if r.get("ok") == "1" else 0
+        x["reboots"] += 1 if r["_reb"] else 0
+        x["relocks"] += 1 if r["_rel"] else 0
+        x["down"] += 1 if modem_down(r) else 0
+        x["loss"] += 1 if (fv(r, "ping_loss") or 0) > 0 else 0
+        u = fv(r, "us_power_max")
+        if u is not None:
+            x["us_max"] = u if x["us_max"] is None else max(x["us_max"], u)
+            x["us_over"] += 1 if u > usmax_lim else 0
+    for r in links:
+        x = D.get(r["time"][:10])
+        if x:
+            x["link_err"] += r["_err"]
+    for e in events:
+        x = D.get(e["time"][:10])
+        if x:
+            x["logged"] = True
+    rows = [D[d] for d in days]
+    while len(rows) > 1 and not rows[0]["polls"] and not rows[0].get("logged"):
+        rows.pop(0)  # before monitoring (or the modem's log) began
+    for x in rows:
+        x["bad"] = bool(x["T3"] or x["T4"] or x["REG"] or x["reboots"] or x["relocks"] or x["down"]
+                        or x["us_over"] or x["uncorr"] >= INGRESS_MIN)
+        x["ingress"] = ing_by_day.get(x["day"])
+    mon = [x for x in rows if x["polls"] or x.get("logged")]
+    S = lambda k: sum(x[k] for x in rows)
+    outs = [o for o in group_outages(summ, interval)]
+    down_min = sum(round((o["end"] - o["start"]) / 60 + interval / 60) for o in outs)
+    usm = [x["us_max"] for x in rows if x["us_max"] is not None]
+    worst = max(rows, key=lambda x: x["uncorr"]) if rows else None
+    # a reboot is "explained" if a confirmed log entry (planned reboot, tech visit)
+    # covers it: started up to 30 min before it, or still running
+    planned = [(int(m["ts"]), max(int(m["end_ts"] or 0), int(m["ts"])) + 1800) for m in maint
+               if m["status"] == "confirmed" and m["source"] != "auto" and m["type"] in ("modem-reboot", "tech")]
+    expl = sum(1 for r in summ if r["_reb"] and any(a <= int(r["ts"]) <= b for a, b in planned))
+    pings = [fv(r, "ping_loss") for r in summ if fv(r, "ping_loss") is not None]
+    data = {
+        "title": (cfg.get("report_title") or "").strip() or "Cable internet service problems: summary",
+        "isp": (cfg.get("isp_name") or "").strip(), "note": (cfg.get("report_note") or "").strip(),
+        "from": rows[0]["day"] if rows else d_from, "asked_from": days[0] if days else d_from, "to": days[-1] if days else d_to,
+        "generated": time.strftime("%Y-%m-%d %H:%M"), "interval": interval,
+        "modem": st.get("modem_info", {}), "limits": {k: fnum(cfg, k) for k in
+                                                      ("us_power_min", "us_power_max", "ds_power_min", "ds_power_max", "ds_snr_min")},
+        "tot": {"days": len(rows), "mon_days": len(mon), "bad_days": sum(1 for x in mon if x["bad"]),
+                "T3": S("T3"), "T4": S("T4"), "DRW": S("DRW"), "REG": S("REG"), "uncorr": S("uncorr"),
+                "reboots": S("reboots"), "router_reboots": expl, "relocks": S("relocks"),
+                "outages": len(outs), "down_min": down_min, "loss_polls": S("loss"), "polls": S("polls"),
+                "us_peak": max(usm) if usm else None, "us_over_days": sum(1 for x in rows if x["us_over"]),
+                "link_err": S("link_err"), "link_on": bool(links),
+                "loss_avg": round(sum(pings) / len(pings), 2) if pings else None,
+                "worst_day": worst["day"] if worst and worst["uncorr"] else None,
+                "worst_unc": worst["uncorr"] if worst else 0},
+        "days": rows, "ingress": ingress,
+        "outages": [{"start": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["start"])),
+                     "mins": round((o["end"] - o["start"]) / 60 + interval / 60), "why": o["why"]} for o in outs][:60],
+        "maint": [{"time": m["time"][:16], "end": (m.get("end_time") or "")[:16], "type": m["type"], "note": m["note"],
+                   "status": m["status"]} for m in maint],
+        "t34": [{"time": e["time"][:16], "type": e["type"], "msg": re.sub(r";?\s*CM-MAC=.*$", "", e["message"])[:200]} for e in events
+                if e["type"] in ("T3", "T4")][-40:],
+    }
+    os.makedirs(cfg["web_dir"], exist_ok=True)
+    out = os.path.join(cfg["web_dir"], "summary.html")
+    page = SUMMARY_HTML.replace("/*__DATA__*/null", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    with open(out + ".tmp", "w") as f:
+        f.write(page)
+    os.chmod(out + ".tmp", 0o644)
+    os.replace(out + ".tmp", out)
+    return out
+
+
+SUMMARY_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Service problem summary</title>
+<style>
+:root{color-scheme:light;--t1:#0b0b0b;--t2:#52514e;--t3:#77766f;--bd:#d9d8d3;--gr:#ecebe7;--bar:#2a78d6;--bad:#c42b2b}
+*{box-sizing:border-box}body{margin:0;background:#fff;color:var(--t1);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.page{max-width:900px;margin:0 auto;padding:24px}
+h1{font-size:21px;margin:0 0 4px}h2{font-size:15px;margin:22px 0 6px;border-bottom:1px solid var(--bd);padding-bottom:3px}
+.sub{color:var(--t2)}.muted{color:var(--t3);font-size:12px}
+.tool{display:flex;gap:8px;justify-content:flex-end;margin-bottom:8px}.tool button{font:inherit;padding:6px 14px;border:1px solid var(--bd);border-radius:6px;background:#f6f6f4;cursor:pointer}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}
+.kpi{border:1px solid var(--bd);border-radius:8px;padding:8px 10px}.kpi .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}.kpi .k{font-size:12px;color:var(--t2)}
+.kpi.bad .v{color:var(--bad)}
+ul.find{margin:6px 0;padding-left:20px}ul.find li{margin:3px 0}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:12px}
+th,td{padding:3px 6px;border-bottom:1px solid var(--gr);text-align:left;vertical-align:top}td:first-child{white-space:nowrap}th{color:var(--t2);font-weight:600}
+td.n,th.n{text-align:right}tr.bad td:first-child{color:var(--bad);font-weight:600}
+svg{display:block;width:100%;height:auto}svg text{fill:var(--t3);font-size:10px}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:700px){.kpis{grid-template-columns:repeat(2,1fr)}.charts{grid-template-columns:1fr}}
+@media print{.tool{display:none}.page{padding:0;max-width:none}h2{break-after:avoid}tr{break-inside:avoid}@page{margin:14mm}}
+</style></head><body><div class="page">
+<div class="tool"><button onclick="window.print()">Print / Save as PDF</button></div>
+<div id="root"></div>
+</div>
+<script>
+const D=/*__DATA__*/null;
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const f=n=>n==null?"–":Number(n).toLocaleString(),T=D.tot,L=D.limits,isp=D.isp||"the ISP";
+const pl=(n,w,ws)=>f(n)+" "+(n===1?w:(ws||w+"s"));
+document.title=D.title+(D.isp?" – "+D.isp:"")+" ("+D.from+" to "+D.to+")";
+let h="<h1>"+esc(D.title)+(D.isp?" – "+esc(D.isp):"")+"</h1>";
+if(D.note)h+="<div>"+esc(D.note)+"</div>";
+const M=D.modem||{};
+h+="<div class=sub>Period: <b>"+D.from+"</b> to <b>"+D.to+"</b> · "+T.mon_days+" of "+T.days+" days with data"+(D.asked_from<D.from?" (data begins "+D.from+")":"")+" · generated "+esc(D.generated)+(M.model?" · modem "+esc(M.model)+" firmware "+esc(M.firmware||"?"):"")+"</div>";
+const K=[["Days with problems",T.bad_days+" / "+T.mon_days,T.bad_days>0],["T3 timeouts",f(T.T3),T.T3>0],["T4 timeouts",f(T.T4),T.T4>0],["Uncorrectable codewords",f(T.uncorr),T.uncorr>0],
+ ["Unexplained modem reboots",f(Math.max(0,T.reboots-T.router_reboots)),T.reboots-T.router_reboots>0],["Re-registrations",f(T.relocks),T.relocks>0],["Outages",T.outages?pl(T.outages,"outage")+", ~"+f(T.down_min)+" min":"0",T.outages>0],
+ ["Peak upstream power",T.us_peak==null?"–":T.us_peak+" dBmV",T.us_peak!=null&&T.us_peak>L.us_power_max]];
+h+="<div class=kpis>"+K.map(k=>"<div class='kpi"+(k[2]?" bad":"")+"'><div class=v>"+k[1]+"</div><div class=k>"+esc(k[0])+"</div></div>").join("")+"</div>";
+const F=[];
+if(T.bad_days)F.push("Service problems were recorded on <b>"+T.bad_days+" of the "+T.mon_days+" days</b> with data.");
+if(T.T3||T.T4)F.push("The modem logged <b>"+pl(T.T3,"T3 timeout")+"</b> and <b>"+pl(T.T4,"T4 timeout")+"</b>. T3 means the modem's upstream ranging requests went unanswered; T4 means the "+esc(isp)+" network stopped answering and the modem had to reset its connection. Both point to the cable plant (line, tap, node), not to the equipment in the home.");
+if(T.uncorr)F.push("<b>"+f(T.uncorr)+" uncorrectable codewords</b>: downstream data that arrived too damaged to repair"+(T.worst_day?", worst on "+T.worst_day+" ("+f(T.worst_unc)+")":"")+".");
+const NI=D.ingress.filter(i=>i.kind==="narrow");
+if(NI.length)F.push("On <b>"+pl(NI.length,"day")+"</b> the errors were concentrated on a few adjacent channels ("+NI.slice(0,4).map(i=>i.day+": "+i.share+"% on "+i.fmin+"–"+i.fmax+" MHz").join("; ")+(NI.length>4?"; …":"")+"). Errors confined to a narrow band are typical of <b>RF ingress</b>: an outside signal leaking into the cable through a damaged line, loose connector or faulty tap.");
+if(T.us_peak!=null&&T.us_peak>L.us_power_max)F.push("Upstream transmit power reached <b>"+T.us_peak+" dBmV</b>, above the "+L.us_power_max+" dBmV guideline, on "+pl(T.us_over_days,"day")+": the modem had to transmit at or near its maximum to be heard, which suggests loss in the line or tap.");
+{const u=Math.max(0,T.reboots-T.router_reboots),P=[];if(u)P.push("rebooted "+pl(u,"time")+" on its own");if(T.relocks)P.push("lost signal and re-registered "+pl(T.relocks,"time")+" without rebooting");if(P.length)F.push("The modem "+P.join(" and ")+"."+(T.router_reboots?" ("+pl(T.router_reboots,"planned reboot")+" listed below "+(T.router_reboots===1?"is":"are")+" not counted.)":""))}
+if(T.outages)F.push(pl(T.outages,"outage")+" (modem unreachable or no internet), about "+f(T.down_min)+" minutes in total.");
+if(T.link_on)F.push(T.link_err?"The router recorded "+f(T.link_err)+" Ethernet errors on its connection to the modem.":"The router’s Ethernet connection to the modem recorded <b>no errors</b>, which rules out the home router and the router–modem cable.");
+if(!F.length)F.push("No problems were recorded in this period.");
+h+="<h2>Findings</h2><ul class=find>"+F.map(x=>"<li>"+x+"</li>").join("")+"</ul>";
+function bars(title,key,unit){const R=D.days,W=420,H=130,Lp=40,B=18,mx=Math.max(1,...R.map(r=>r[key]));const tk=[0,mx/2,mx].map(v=>Math.round(v));
+ const bw=(W-Lp-4)/R.length;let g="<div><b>"+esc(title)+"</b> <span class=muted>("+esc(unit)+")</span><svg viewBox='0 0 "+W+" "+H+"' role=img aria-label='"+esc(title)+"'>";
+ tk.forEach(v=>{const y=4+(1-v/mx)*(H-4-B);g+="<line x1="+Lp+" x2="+W+" y1="+y+" y2="+y+" stroke='var(--gr)'/><text x="+(Lp-4)+" y="+(y+3)+" text-anchor=end>"+f(v)+"</text>"});
+ R.forEach((r,i)=>{const v=r[key];if(v>0){const y=4+(1-v/mx)*(H-4-B);g+="<rect x="+(Lp+i*bw+1).toFixed(1)+" y="+y.toFixed(1)+" width="+Math.max(1,bw-2).toFixed(1)+" height="+(H-B-y).toFixed(1)+" rx=1 fill='var(--bar)'><title>"+r.day+": "+f(v)+"</title></rect>"}});
+ const lab=[0,Math.floor(R.length/2),R.length-1].filter((v,i,a)=>a.indexOf(v)===i);lab.forEach(i=>{if(R[i])g+="<text x="+(Lp+i*bw+bw/2).toFixed(1)+" y="+(H-4)+" text-anchor=middle>"+R[i].day.slice(5)+"</text>"});
+ return g+"</svg></div>"}
+D.days.forEach(r=>r.t34=r.T3+r.T4);
+h+="<h2>Day by day</h2><div class=charts>"+bars("Uncorrectable codewords per day","uncorr","count")+bars("T3 + T4 timeouts per day","t34","count")+"</div>";
+const many=D.days.length>62,DR=many?D.days.filter(r=>r.bad):D.days;
+h+=(many?"<div class=muted>Only days with problems are listed ("+DR.length+").</div>":"")+"<table><tr><th>Day</th><th class=n>T3</th><th class=n>T4</th><th class=n>Re-reg. events</th><th class=n>Uncorrectables</th><th class=n>Peak US dBmV</th><th class=n>Reboots</th><th class=n>Re-reg.</th><th class=n>Unreachable samples</th><th class=n>Loss samples</th><th>Pattern</th></tr>"+
+ DR.map(r=>"<tr"+(r.bad?" class=bad":"")+"><td>"+r.day+"</td><td class=n>"+r.T3+"</td><td class=n>"+r.T4+"</td><td class=n>"+r.REG+"</td><td class=n>"+f(r.uncorr)+"</td><td class=n>"+f(r.us_max)+"</td><td class=n>"+r.reboots+"</td><td class=n>"+r.relocks+"</td><td class=n>"+r.down+"</td><td class=n>"+r.loss+"</td><td>"+(r.ingress?(r.ingress.kind==="narrow"?"ingress? "+r.ingress.share+"% on "+r.ingress.fmin+"–"+r.ingress.fmax+" MHz":"spread across band"):(r.polls?"":(r.logged?"modem log only":"no data")))+"</td></tr>").join("")+"</table>";
+if(D.maint.length)h+="<h2>Repairs, calls and changes</h2><table><tr><th>When</th><th>Type</th><th>What happened</th></tr>"+D.maint.map(m=>"<tr><td>"+esc(m.time)+(m.end?" to "+esc(m.end.slice(0,10)===m.time.slice(0,10)?m.end.slice(11):m.end):"")+"</td><td style='white-space:nowrap'>"+esc(m.type)+(m.status==="suggested"?" (auto-detected)":"")+"</td><td>"+esc(m.note)+"</td></tr>").join("")+"</table>";
+if(D.outages.length)h+="<h2>Outages</h2><table><tr><th>Start</th><th class=n>About (min)</th><th>Detail</th></tr>"+D.outages.map(o=>"<tr><td>"+o.start+"</td><td class=n>"+o.mins+"</td><td>"+esc(o.why)+"</td></tr>").join("")+"</table>";
+if(D.t34.length)h+="<h2>Timeouts logged by the modem"+(T.T3+T.T4>D.t34.length?" (latest "+D.t34.length+")":"")+"</h2><table><tr><th>Time</th><th>Type</th><th>Modem log message</th></tr>"+D.t34.map(e=>"<tr><td>"+e.time+"</td><td>"+e.type+"</td><td>"+esc(e.msg)+"</td></tr>").join("")+"</table>";
+h+="<h2>How this was measured</h2><p class=muted>The router polled the cable modem's status page every "+Math.round(D.interval/60)+" minutes, recording downstream and upstream signal levels, error counters and the modem's own event log, and pinged the internet each time. Timeouts are counted from the modem's event log. Guidelines used: upstream power "+L.us_power_min+"–"+L.us_power_max+" dBmV, downstream power "+L.ds_power_min+" to +"+L.ds_power_max+" dBmV, SNR at least "+L.ds_snr_min+" dB. The full raw data (CSV) is available on request. Generated by luci-app-modem-monitor.</p>";
+document.getElementById("root").innerHTML=h;
+</script></body></html>
+"""
 
 # --------------------------------------------------------------------------
 # Modem reboot and maintenance commands
@@ -2187,6 +2808,24 @@ def main():
         except ModemError as e:
             print("error: %s" % e)
             sys.exit(1)
+    elif cmd == "summary":
+        pos, kv, bools = _opts(args[1:], ("--from", "--to"))
+        today = time.strftime("%Y-%m-%d")
+        d_to = kv.get("to") or today
+        d_from = kv.get("from") or time.strftime("%Y-%m-%d", time.localtime(time.time() - 29 * 86400))
+        try:
+            print(complaint_summary(cfg, d_from, d_to))
+        except ValueError as e:
+            print("error: dates must be YYYY-MM-DD (%s)" % e)
+            sys.exit(2)
+    elif cmd == "alert-test":
+        res = alert_test(cfg)
+        if "--json" in args:
+            print(json.dumps([{"channel": c, "ok": ok, "detail": d} for c, ok, d in res]))
+        else:
+            for c, ok, d in res:
+                print("%-9s %s  %s" % (c, "OK  " if ok else "FAIL", d))
+        sys.exit(0 if any(ok for _, ok, _ in res) else 1)
     elif cmd == "export":
         p = export(cfg, "--full" in args)
         print("%s (%d KB)" % (os.path.basename(p), round(os.path.getsize(p) / 1024)))

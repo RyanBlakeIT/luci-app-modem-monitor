@@ -78,6 +78,39 @@ return view.extend({
 		});
 	},
 
+	complaintSummary: function() {
+		var pad = function(n) { return (n < 10 ? '0' : '') + n; };
+		var iso = function(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+		var now = new Date(), from = E('input', { 'type': 'date', 'class': 'cbi-input-text', 'value': iso(new Date(now.getTime() - 29 * 86400000)) }),
+			to = E('input', { 'type': 'date', 'class': 'cbi-input-text', 'value': iso(now) });
+		ui.showModal(_('Complaint summary'), [
+			E('p', {}, _('A one-page, printable summary for a date range: findings in plain language, day-by-day counts, repairs and calls from the maintenance log, outages and the timeouts the modem logged. Print it or save it as a PDF for your ISP or a regulator.')),
+			E('div', { 'style': 'display:flex;gap:12px;align-items:center;flex-wrap:wrap' }, [
+				E('label', {}, [ _('From') + ' ', from ]), E('label', {}, [ _('To') + ' ', to ])
+			]),
+			E('div', { 'class': 'right', 'style': 'margin-top:12px' }, [
+				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
+				E('button', { 'class': 'btn cbi-button-positive', 'click': function() {
+					if (!from.value || !to.value) return;
+					ui.showModal(_('Complaint summary'), [ E('p', { 'class': 'spinning' }, _('Building the summary…')) ]);
+					return exec([ 'summary', '--from', from.value, '--to', to.value ]).then(function() {
+						var url = '/modem-monitor/summary.html?t=' + Date.now();
+						ui.showModal(_('Complaint summary ready'), [
+							E('p', {}, _('%s to %s. It opens in a new tab; use its "Print / Save as PDF" button.').format(from.value, to.value)),
+							E('div', { 'class': 'right' }, [
+								E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Close')), ' ',
+								E('a', { 'class': 'btn cbi-button-positive', 'href': url, 'target': '_blank', 'rel': 'noopener', 'click': ui.hideModal }, _('Open summary'))
+							])
+						]);
+					}).catch(function(e) {
+						ui.hideModal();
+						ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' }, e.message), 'danger');
+					});
+				} }, _('Build summary'))
+			])
+		]);
+	},
+
 	rebootModem: function() {
 		var note = E('input', { 'type': 'text', 'class': 'cbi-input-text', 'style': 'width:100%',
 			'placeholder': _('Optional: why (e.g. fresh baseline after tech visit)') });
@@ -190,6 +223,10 @@ return view.extend({
 				'class': 'btn cbi-button cbi-button-positive',
 				'click': ui.createHandlerFn(this, 'download')
 			}, _('Download all data')), ' ',
+			E('button', {
+				'class': 'btn cbi-button',
+				'click': ui.createHandlerFn(this, 'complaintSummary')
+			}, _('Complaint summary')), ' ',
 			E('a', { 'class': 'btn cbi-button', 'href': REPORT, 'target': '_blank' }, _('Open in new tab')), ' ',
 			E('button', {
 				'class': 'btn cbi-button cbi-button-negative', 'style': 'float:right',

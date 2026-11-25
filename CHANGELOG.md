@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0
+- **Alerts:** ntfy (just enter a topic name), Pushover, Telegram, JSON webhook or email. They cover:
+  - modem unreachable, and back online
+  - reboots you didn't start
+  - re-registrations
+  - T3/T4 bursts
+  - uncorrectable spikes, naming the affected channels when the errors are concentrated
+  - upstream power above the guideline
+  - packet loss
+  Thresholds and a per-type cooldown are on the new Settings → Alerts section, along with **Send a test alert**. Alerts raised while the internet is down are kept and delivered once it is back.
+- **Downstream errors by channel:** a heatmap of uncorrectables per channel over time on the report, for each time range.
+- **Ingress detection:** days with 1,000+ uncorrectables are classed as concentrated on 3 adjacent channels (typical of RF ingress, with the frequency range given) or spread across the band.
+- **Complaint summary:** a printable page for any date range, opened from the new **Complaint summary** button or `modem-monitor summary --from --to`. It contains plain-language findings, key counts, daily charts and table, repairs and calls, outages, and the modem's timeout messages (with MAC addresses removed). Reboots covered by a planned-reboot or tech-visit entry are not counted as unexplained.
+- CLI: `summary`, `alert-test [--json]`.
+- UCI list options (such as `alert_on`) are read correctly.
+
 ## 1.1.4
 - **Updates from GitHub:** checks the repository's latest release once a day, and when the Signal Report page opens if the last check is over a day old. When a newer version exists, the page shows a banner with **What's new** and **Install update**.
 - Installing downloads the release `.apk` (or `.ipk` on opkg systems), verifies its size and SHA-256 against the checksum GitHub publishes, and installs it with the package manager in the background while the page shows progress. Nothing is installed without a click.

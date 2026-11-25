@@ -32,6 +32,11 @@ jobs:
           python3 root/usr/bin/modem-monitor test
           python3 root/usr/bin/modem-monitor poll
           python3 root/usr/bin/modem-monitor poll
+          curl -s http://127.0.0.1:18080/_ingress >/dev/null
+          python3 root/usr/bin/modem-monitor poll
+          python3 root/usr/bin/modem-monitor summary
+          test -s /tmp/mm-www/summary.html
+          ! python3 root/usr/bin/modem-monitor alert-test
           python3 root/usr/bin/modem-monitor mark "CI entry" --type other
           python3 root/usr/bin/modem-monitor export
           test -s /tmp/mm-www/index.html

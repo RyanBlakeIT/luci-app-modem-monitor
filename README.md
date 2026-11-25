@@ -15,6 +15,9 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 - **"Show data since" filter:** counts, charts and tables start after a chosen maintenance entry, so you can see whether a repair actually helped.
 - **Reboot modem button:** sends the same command as the modem's Configuration page and logs it with the exact time.
 - **Router–modem link:** CRC, alignment and collision counters, link drops and speed changes on the WAN port, so a bad patch cable can be ruled out. NIC receive overruns (`rx_missed`) are tracked separately as a router tuning issue.
+- **Per-channel error heatmap and ingress detection:** uncorrectable errors per downstream channel over time. Days when most errors sit on a few adjacent channels are flagged as likely RF ingress, with the frequency range, which is useful evidence that the problem is in the cable plant.
+- **Alerts:** phone notifications through [ntfy](https://ntfy.sh) (no account needed), Pushover, Telegram, a JSON webhook or email for outages, unexplained reboots, re-registrations, T3/T4 bursts, uncorrectable spikes (with the affected channels), high upstream power and packet loss. Alerts raised while the internet is down are delivered once it is back.
+- **Complaint summary:** a printable one-page summary for any date range, with findings in plain language, day-by-day counts, repairs and calls from the maintenance log, outages and the modem's own timeout messages. Print it or save it as a PDF.
 - **Download all data:** one `.zip` with every CSV, the report and a diagnostics snapshot. MAC addresses and public IP addresses are masked by default.
 - **Updates:** checks GitHub for a newer release daily and offers to install it from the Signal Report page. The download is verified against GitHub's published SHA-256 checksum, and nothing is installed without your click.
 - **`latest.json`:** the newest sample, for Zabbix or other monitoring.
@@ -70,6 +73,15 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 | `modem_eee`, `modem_led` | `0`, `1` | Fallback EEE/LED values re-sent with a reboot command (read live from the modem first) |
 | `ping_targets`, `ping_count` | `1.1.1.1 8.8.8.8`, `5` | Internet reachability check |
 | `us_power_min/max`, `ds_power_min/max`, `ds_snr_min` | `35/51`, `-7/7`, `33` | Shaded "healthy" bands (common DOCSIS 3.1 guidelines, not ISP specs) |
+| `alert_enabled` | `0` | Send alerts |
+| `alert_on` | all | List of: `outage reboot relock t3t4 uncorr us_power loss` |
+| `alert_ntfy_url`, `alert_ntfy_token` | — | ntfy topic name (uses ntfy.sh) or full URL; token for protected topics |
+| `alert_pushover_user`, `alert_pushover_token` | — | Pushover |
+| `alert_telegram_token`, `alert_telegram_chat` | — | Telegram bot token and chat ID |
+| `alert_webhook_url` | — | JSON POST: `title`, `message`, `kind`, `priority`, `ts`, `host` |
+| `alert_email_to`, `alert_email_from` | — | Needs a working `sendmail` (e.g. msmtp) |
+| `alert_t3t4_count`, `alert_uncorr`, `alert_loss` | `3`, `5000`, `20` | T3/T4 per hour, uncorrectables per sample, % loss per sample |
+| `alert_outage_polls`, `alert_cooldown_min` | `2`, `60` | Failed samples before "unreachable"; minimum minutes between repeats of one alert type |
 
 ### Reaching the modem (and DDNS)
 
@@ -87,6 +99,8 @@ modem-monitor maint-list [--json]
 modem-monitor maint-edit ID [--type T] [--time ...] [--end ...] [--note ...]
 modem-monitor maint-confirm ID | maint-del ID
 modem-monitor maint-import FILE.csv         # columns: time,end_time,type,note[,source]
+modem-monitor summary [--from YYYY-MM-DD] [--to YYYY-MM-DD]   # printable complaint summary (default: last 30 days)
+modem-monitor alert-test                    # send a test notification to every configured channel
 modem-monitor export [--full]               # one .zip; --full keeps MAC/public IP addresses
 modem-monitor update-check [--json]         # is a newer release on GitHub?
 modem-monitor update-install                # download (verified) and install it
@@ -97,7 +111,7 @@ Maintenance types: `tech`, `isp-call`, `outage`, `modem-reboot`, `router-change`
 
 ## Data and privacy
 
-- Everything stays on the router. The only outside connections are the pings and, if update checks are on, one daily request to the GitHub API for the latest release.
+- Everything stays on the router. The only outside connections are the pings, one daily request to the GitHub API for the latest release (if update checks are on), and the alert services you configure. A public ntfy.sh topic can be read by anyone who knows its name, so use a long random one or a protected topic.
 - The modem password is stored in UCI in plain text, as with other OpenWrt credentials.
 - The report and `latest.json` are served by uhttpd at `http://<router>/modem-monitor/` on your LAN.
 - Exports mask MAC addresses and public IP addresses unless you use `--full`.
