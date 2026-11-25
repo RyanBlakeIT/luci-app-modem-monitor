@@ -1,0 +1,14 @@
+{
+	"luci-app-modem-monitor": {
+		"description": "Grant access to the cable modem monitor",
+		"read": {
+			"uci": [ "modem_monitor" ]
+		},
+		"write": {
+			"uci": [ "modem_monitor" ],
+			"file": {
+				"/usr/bin/modem-monitor": [ "exec" ]
+			}
+		}
+	}
+}

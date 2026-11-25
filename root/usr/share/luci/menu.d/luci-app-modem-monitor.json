@@ -1,0 +1,39 @@
+{
+	"admin/status/modem-monitor": {
+		"title": "Cable Modem",
+		"order": 65,
+		"action": {
+			"type": "alias",
+			"path": "admin/status/modem-monitor/report"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-modem-monitor"
+			]
+		}
+	},
+	"admin/status/modem-monitor/report": {
+		"title": "Signal Report",
+		"order": 1,
+		"action": {
+			"type": "view",
+			"path": "modem-monitor/report"
+		}
+	},
+	"admin/status/modem-monitor/settings": {
+		"title": "Settings",
+		"order": 3,
+		"action": {
+			"type": "view",
+			"path": "modem-monitor/settings"
+		}
+	},
+	"admin/status/modem-monitor/maintenance": {
+		"title": "Maintenance Log",
+		"order": 2,
+		"action": {
+			"type": "view",
+			"path": "modem-monitor/maintenance"
+		}
+	}
+}

@@ -1,0 +1,1887 @@
+#!/usr/bin/env python3
+"""
+modem-monitor - log Arris SURFboard S33 signal stats and event log on OpenWrt,
+and build an HTML evidence report (signal levels, errors, T3/T4 timeouts,
+reboots, outages, packet loss).
+
+Commands:
+  modem-monitor daemon   run forever (used by /etc/init.d/modem-monitor)
+  modem-monitor poll     take one sample now
+  modem-monitor report   rebuild the HTML report now
+  modem-monitor test     log in to the modem and print what it returns
+  modem-monitor test --raw   same, plus the raw HNAP responses
+  modem-monitor reboot-modem [--note "why"]   reboot the modem and log it
+  modem-monitor mark "note" [--type T] [--time "YYYY-MM-DD HH:MM"] [--end ...]
+                         add a maintenance-log entry (types: tech, modem-reboot,
+                         router-change, isp-call, outage, other)
+  modem-monitor maint-list [--json] | maint-edit ID [--type --time --end --note]
+  modem-monitor maint-del ID | maint-confirm ID | maint-import FILE.csv
+  modem-monitor export   bundle all data + diagnostics into one .zip
+                         (MAC/public IP addresses masked; --full keeps them)
+
+Settings live in UCI: /etc/config/modem_monitor (edit in LuCI under
+Status > Cable Modem > Settings).
+"""
+
+import csv
+import glob
+import hashlib
+import hmac
+import json
+import os
+import re
+import shutil
+import ssl
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import zipfile
+from datetime import datetime, timedelta
+
+VERSION = "1.1.1"
+HNAP_NS = "http://purenetworks.com/HNAP1/"
+
+DEFAULTS = {
+    "enabled": "1",
+    "host": "192.168.100.1",
+    "username": "admin",
+    "password": "",
+    "interval": "300",
+    "report_interval": "900",
+    "data_dir": "/root/modem-monitor",
+    "web_dir": "/tmp/modem-monitor-www",
+    "ping_targets": "1.1.1.1 8.8.8.8",
+    "ping_count": "5",
+    "retention_days": "90",
+    # Guideline ranges commonly published for DOCSIS 3.1 modems.
+    # Your ISP's exact specs may differ; adjust in Settings.
+    "us_power_min": "35",
+    "us_power_max": "51",
+    "ds_power_min": "-7",
+    "ds_power_max": "7",
+    "ds_snr_min": "33",
+    "timeout": "15",
+    "wan_device": "",  # empty = auto-detect from the 'wan' interface
+    "isp_name": "",      # shown in the report, e.g. "Comcast"; empty = "your ISP"
+    "report_title": "",  # custom report title; empty = "Cable modem signal report"
+    "report_note": "",   # one line under the title, e.g. account / complaint reference
+    # Echoed back with a reboot command (S33 Configuration page sends them);
+    # read live from the modem first, these are only the fallback.
+    "modem_eee": "0",
+    "modem_led": "1",
+}
+
+LOGIN_BACKOFF_S = 1800  # after a failed login, wait 30 min (avoid modem lockout)
+
+
+def log(msg):
+    # stdout -> daemon.info under procd (stderr would show as daemon.err)
+    sys.stdout.write("modem-monitor: %s\n" % msg)
+    sys.stdout.flush()
+
+
+# --------------------------------------------------------------------------
+# Config
+# --------------------------------------------------------------------------
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    alt = os.environ.get("MODEM_MONITOR_CONF")
+    if alt:  # simple key=value file, used for testing off-router
+        with open(alt) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    cfg[k.strip()] = v.strip()
+        return cfg
+    try:
+        out = subprocess.run(["uci", "-q", "show", "modem_monitor.main"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    for line in out.splitlines():
+        m = re.match(r"modem_monitor\.main\.(\w+)=(.*)$", line)
+        if m:
+            v = m.group(2)
+            if len(v) >= 2 and v[0] == v[-1] == "'":
+                v = v[1:-1].replace("'\\''", "'")
+            cfg[m.group(1)] = v
+    return cfg
+
+
+def fnum(cfg, key):
+    try:
+        return float(cfg.get(key, DEFAULTS.get(key, "0")))
+    except ValueError:
+        return float(DEFAULTS.get(key, "0"))
+
+
+# --------------------------------------------------------------------------
+# State (session, dedup of event log, last counters)
+# --------------------------------------------------------------------------
+
+def state_path(cfg):
+    return os.path.join(cfg["data_dir"], "state.json")
+
+
+def load_state(cfg):
+    try:
+        with open(state_path(cfg)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(cfg, st):
+    p = state_path(cfg)
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(st, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+
+
+# --------------------------------------------------------------------------
+# HNAP client for the Arris S33
+# --------------------------------------------------------------------------
+
+class ModemError(Exception):
+    pass
+
+
+class AuthError(ModemError):
+    pass
+
+
+class Unreachable(ModemError):
+    pass
+
+
+class S33:
+    """HNAP JSON API used by the S33 web UI. Firmware differs in HMAC
+    (older MD5, newer SHA-256) and http/https, so both are auto-detected
+    and the working combination is remembered in state."""
+
+    def __init__(self, cfg, st):
+        self.host = cfg["host"]
+        self.user = cfg["username"]
+        self.password = cfg["password"]
+        self.timeout = fnum(cfg, "timeout")
+        self.st = st
+        self.ctx = ssl.create_default_context()
+        self.ctx.check_hostname = False
+        self.ctx.verify_mode = ssl.CERT_NONE
+
+    @staticmethod
+    def _hmac(key, msg, algo):
+        return hmac.new(key.encode(), msg.encode(), getattr(hashlib, algo)).hexdigest().upper()
+
+    def _auth_header(self, action, algo, pk):
+        ts = str(int(time.time() * 1000) % 2000000000000)
+        sig = self._hmac(pk or "withoutloginkey", ts + '"%s%s"' % (HNAP_NS, action), algo)
+        return "%s %s" % (sig, ts)
+
+    def _post(self, scheme, action, body, algo, uid=None, pk=None):
+        base = "%s://%s" % (scheme, self.host)
+        headers = {
+            "Content-Type": "application/json; charset=UTF-8",
+            "Accept": "application/json",
+            "SOAPACTION": '"%s%s"' % (HNAP_NS, action),
+            "HNAP_AUTH": self._auth_header(action, algo, pk),
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": base + ("/Login.html" if action == "Login" else "/Cmconnectionstatus.html"),
+        }
+        if uid:
+            headers["Cookie"] = "uid=%s; PrivateKey=%s" % (uid, pk)
+        req = urllib.request.Request(base + "/HNAP1/", data=json.dumps(body).encode(),
+                                     headers=headers, method="POST")
+        kw = {"timeout": self.timeout}
+        if scheme == "https":
+            kw["context"] = self.ctx
+        try:
+            with urllib.request.urlopen(req, **kw) as r:
+                raw = r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise AuthError("HTTP %d" % e.code)
+            raise ModemError("HTTP %d from modem" % e.code)
+        except (urllib.error.URLError, OSError) as e:
+            raise Unreachable("cannot reach modem at %s (%s)" % (base, getattr(e, "reason", e)))
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise ModemError("modem returned non-JSON (%d bytes)" % len(raw))
+
+    def login(self):
+        if not self.password:
+            raise AuthError("no modem password set (Status > Cable Modem > Settings)")
+        pwtag = hashlib.sha256(("%s:%s" % (self.user, self.password)).encode()).hexdigest()[:16]
+        until = self.st.get("login_backoff_until", 0)
+        if time.time() < until and self.st.get("login_backoff_pw") == pwtag:
+            raise AuthError("login failed earlier; waiting until %s before retrying (avoids lockout)"
+                            % datetime.fromtimestamp(until).strftime("%H:%M"))
+        schemes = [self.st.get("scheme", "https")]
+        schemes += [s for s in ("https", "http") if s not in schemes]
+        algos = [self.st.get("algo", "sha256")]
+        algos += [a for a in ("sha256", "md5") if a not in algos]
+        last_err = None
+        rejected = None
+        reached = False
+        for scheme in schemes:
+            for algo in algos:
+                got_challenge = False
+                try:
+                    r = self._post(scheme, "Login", {"Login": {
+                        "Action": "request", "Username": self.user, "LoginPassword": "",
+                        "Captcha": "", "PrivateLogin": "LoginPassword"}}, algo)
+                    reached = True
+                    lr = r.get("LoginResponse", {})
+                    ch, pub, uid = lr.get("Challenge"), lr.get("PublicKey"), lr.get("Cookie")
+                    if not (ch and pub):
+                        last_err = AuthError("unexpected login challenge: %s" % json.dumps(lr)[:200])
+                        continue
+                    got_challenge = True
+                    pk = self._hmac(pub + self.password, ch, algo)
+                    lp = self._hmac(pk, ch, algo)
+                    r = self._post(scheme, "Login", {"Login": {
+                        "Action": "login", "Username": self.user, "LoginPassword": lp,
+                        "Captcha": "", "PrivateLogin": "LoginPassword"}}, algo, uid, pk)
+                    res = r.get("LoginResponse", {}).get("LoginResult")
+                    if res == "OK":
+                        self.st.update(scheme=scheme, algo=algo, uid=uid, private_key=pk)
+                        self.st.pop("login_backoff_until", None)
+                        return
+                    rejected = AuthError("modem rejected login (%s)" % res)
+                except Unreachable as e:
+                    last_err = e
+                    break  # nothing listening on this scheme; try the next one
+                except ModemError as e:
+                    reached = True
+                    last_err = e
+                    if got_challenge and not rejected:
+                        rejected = AuthError("modem rejected login (%s)" % e)
+        if reached:
+            self.st["login_backoff_until"] = time.time() + LOGIN_BACKOFF_S
+            self.st["login_backoff_pw"] = pwtag
+            raise AuthError("login failed - check the modem password (%s)" % (rejected or last_err))
+        raise last_err or ModemError("cannot reach modem")
+
+    def call(self, actions):
+        """GetMultipleHNAPs with session reuse; logs in again if the session expired."""
+        body = {"GetMultipleHNAPs": {a: "" for a in actions}}
+        for attempt in (0, 1):
+            if not self.st.get("uid") or attempt == 1:
+                self.login()
+            try:
+                r = self._post(self.st["scheme"], "GetMultipleHNAPs", body,
+                               self.st["algo"], self.st["uid"], self.st["private_key"])
+            except Unreachable:
+                raise
+            except ModemError:
+                # Stale session (e.g. after a modem reboot) may come back as
+                # 401/403/404/500 depending on firmware: log in again once.
+                self.st.pop("uid", None)
+                continue
+            # Some firmware omits the GetMultipleHNAPsResponse wrapper.
+            resp = r.get("GetMultipleHNAPsResponse") or r
+            if any(a + "Response" in resp for a in actions) \
+                    and str(resp.get("GetMultipleHNAPsResult", "OK")).upper() == "OK":
+                return resp
+            self.st.pop("uid", None)  # session expired / UN-AUTH
+        raise AuthError("modem refused the status request after re-login")
+
+
+
+
+def _s33_set(self, action, payload):
+    """One HNAP Set action. Re-login only on an auth refusal, so a command is
+    never sent twice."""
+    for attempt in (0, 1):
+        if not self.st.get("uid") or attempt == 1:
+            self.login()
+        try:
+            return self._post(self.st["scheme"], action, {action: payload},
+                              self.st["algo"], self.st["uid"], self.st["private_key"])
+        except AuthError:
+            self.st.pop("uid", None)
+    raise AuthError("modem refused %s after re-login" % action)
+
+
+S33.set = _s33_set
+
+
+# --------------------------------------------------------------------------
+# Parsing
+# --------------------------------------------------------------------------
+
+NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def num(s):
+    m = NUM_RE.search(str(s or ""))
+    return float(m.group(0)) if m else None
+
+
+def mhz(s):
+    v = num(s)
+    if v is None:
+        return None
+    return round(v / 1e6, 3) if v > 100000 else v
+
+
+def parse_downstream(raw):
+    out = []
+    for e in (raw or "").split("|+|"):
+        f = e.split("^")
+        if len(f) < 9:
+            continue
+        out.append({"ch": f[3].strip() or f[0].strip(), "lock": f[1].strip(), "mod": f[2].strip(),
+                    "freq": mhz(f[4]), "power": num(f[5]), "snr": num(f[6]),
+                    "corr": int(num(f[7]) or 0), "uncorr": int(num(f[8]) or 0)})
+    return out
+
+
+def parse_upstream(raw):
+    out = []
+    for e in (raw or "").split("|+|"):
+        f = e.split("^")
+        if len(f) < 7:
+            continue
+        out.append({"ch": f[3].strip() or f[0].strip(), "lock": f[1].strip(), "mod": f[2].strip(),
+                    "width": mhz(f[4]), "freq": mhz(f[5]), "power": num(f[6])})
+    return out
+
+
+UPTIME_RE = re.compile(r"(?:(\d+)\s*day[^\d]*)?(\d+)\s*h\s*:?\s*(\d+)\s*m\s*:?\s*(\d+)\s*s", re.I)
+
+
+def parse_uptime(resp):
+    for v in (resp or {}).values():
+        m = UPTIME_RE.search(str(v))
+        if m:
+            d, h, mi, s = (int(x or 0) for x in m.groups())
+            return d * 86400 + h * 3600 + mi * 60 + s
+    return None
+
+
+DATE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}$")
+TIME_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$")
+
+
+def parse_events(resp):
+    raw = ""
+    for k, v in (resp or {}).items():
+        if isinstance(v, str) and "^" in v and len(v) > len(raw):
+            raw = v
+    out = []
+    for e in re.split(r"\}-\{|\|\+\|", raw):
+        f = [x.strip() for x in e.strip("{} \n").split("^")]
+        f = [x for x in f if x != ""]
+        if not f:
+            continue
+        date = next((x for x in f if DATE_RE.match(x)), "")
+        tm = next((x for x in f if TIME_RE.match(x)), "")
+        msg = max(f, key=len)
+        rest = f[1:] if len(f) >= 4 else f
+        prio = next((x for x in reversed(rest) if x.isdigit() and len(x) == 1), "")
+        out.append({"date": date, "time": tm, "prio": prio, "msg": msg})
+    return out
+
+
+def _parse_dt(ev):
+    d, m, y = (int(x) for x in ev["date"].split("/"))
+    if y < 100:
+        y += 2000
+    hh, mm, *ss = (int(x) for x in (ev["time"] or "0:0").split(":"))
+    return datetime(y, m, d, hh, mm, ss[0] if ss else 0)
+
+
+def boot_offset(ev):
+    """Seconds since boot for entries logged before the modem set its clock
+    (shown as 31/12/1969 19:00:xx or 1/1/1970 00:00:xx). None if dated."""
+    try:
+        t = _parse_dt(ev)
+    except (ValueError, KeyError):
+        return None
+    if t.year >= 2020:
+        return None
+    for base in (datetime(1969, 12, 31, 19, 0, 0), datetime(1970, 1, 1, 0, 0, 0)):
+        off = (t - base).total_seconds()
+        if 0 <= off < 7 * 86400:
+            return int(off)
+    return 0
+
+
+def event_ts(ev, fallback, boot_ts=None):
+    """Modem log date is D/M/YYYY. Entries from before the modem's clock was
+    set are placed at boot time + offset (boot time comes from uptime)."""
+    off = boot_offset(ev)
+    if off is not None:
+        return int(boot_ts + off) if boot_ts else int(fallback)
+    try:
+        t = _parse_dt(ev)
+        if t.timestamp() <= fallback + 86400:
+            return int(t.timestamp())
+    except (ValueError, KeyError):
+        pass
+    return int(fallback)
+
+
+def event_key(ev, boot_ts):
+    # Pre-clock entries repeat with identical text/offset on every boot,
+    # so they're keyed per boot.
+    k = "%s|%s|%s" % (ev["date"], ev["time"], ev["msg"])
+    if boot_offset(ev) is not None and boot_ts:
+        k = "boot%d|%s" % (boot_ts, k)
+    return k
+
+
+def migrate_102(cfg, st, boot_ts):
+    """v1.0.1 stamped pre-clock entries with the time they were first read.
+    Re-stamp them from the boot time and re-key them (current boot assumed)."""
+    if st.get("migrated_102") or not boot_ts:
+        return
+    path = os.path.join(cfg["data_dir"], "events.csv")
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            rows = list(csv.DictReader(f))
+        changed = 0
+        for r in rows:
+            ev = {"date": r.get("modem_date", ""), "time": r.get("modem_time", ""), "msg": r.get("message", "")}
+            if boot_offset(ev) is not None:
+                ts = event_ts(ev, int(r["ts"]), boot_ts)
+                r["ts"], r["time"] = ts, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+                r["type"] = classify(r["message"])
+                changed += 1
+            else:
+                r["type"] = classify(r.get("message", ""))
+        tmp = path + ".tmp"
+        with open(tmp, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=EVENT_COLS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        os.replace(tmp, path)
+        log("re-stamped %d pre-clock log entries from modem boot time" % changed)
+    seen = st.get("seen_events", [])
+    new = []
+    for k in seen:
+        parts = k.split("|", 2)
+        if len(parts) == 3 and not k.startswith("boot"):
+            ev = {"date": parts[0], "time": parts[1], "msg": parts[2]}
+            k = event_key(ev, boot_ts)
+        new.append(k)
+    st["seen_events"] = new
+    st["migrated_102"] = 1
+
+
+def classify(msg):
+    m = msg.lower()
+    if "t3 time" in m or "t3 timeout" in m:
+        return "T3"
+    if "t4 time" in m or "t4 timeout" in m:
+        return "T4"
+    if "dhcp failed" in m or "tftp failed" in m or "tod request" in m or "reg rsp not received" in m:
+        return "PROVISION"
+    if "dynamic range window" in m or "top of the drw" in m:
+        return "DRW"
+    if "diplexer" in m or "honoring mdd" in m:
+        return "INFO"
+    if "sync" in m or "mdd" in m or "lost" in m:
+        return "SYNC"
+    if "webgui login" in m or "login from" in m:
+        return "LOGIN"
+    return "OTHER"
+
+
+# --------------------------------------------------------------------------
+# Ping
+# --------------------------------------------------------------------------
+
+def ping(target, count):
+    try:
+        out = subprocess.run(["ping", "-c", str(count), "-W", "2", target],
+                             capture_output=True, text=True, timeout=count * 3 + 5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None, None, None
+    loss = re.search(r"(\d+(?:\.\d+)?)% packet loss", out)
+    rtt = re.search(r"= ([\d.]+)/([\d.]+)/([\d.]+)", out)
+    return (float(loss.group(1)) if loss else 100.0,
+            float(rtt.group(2)) if rtt else None,
+            float(rtt.group(3)) if rtt else None)
+
+
+# --------------------------------------------------------------------------
+# Router <-> modem Ethernet link (WAN NIC counters)
+# --------------------------------------------------------------------------
+
+LINK_COLS = ["ts", "time", "dev", "operstate", "speed", "duplex", "carrier_changes",
+             "rx_errors", "tx_errors", "rx_crc_errors", "rx_frame_errors", "rx_missed",
+             "rx_dropped", "align_errors", "collisions", "tx_underrun",
+             "err_delta", "missed_delta", "link_drops", "speed_changed"]
+# Counters whose increase means a physical/link problem (rx_dropped excluded:
+# Linux counts unhandled protocols such as LLDP there).
+ERR_KEYS = ("rx_errors", "tx_errors", "rx_missed", "collisions", "tx_underrun")
+LINK_ERR_KEYS = ("rx_errors", "tx_errors", "collisions", "tx_underrun", "align_errors")
+
+
+def wan_device(cfg):
+    if cfg.get("wan_device"):
+        return cfg["wan_device"]
+    try:
+        out = subprocess.run(["ifstatus", "wan"], capture_output=True, text=True, timeout=10).stdout
+        j = json.loads(out)
+        return j.get("l3_device") or j.get("device")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        return subprocess.run(["uci", "-q", "get", "network.wan.device"], capture_output=True,
+                              text=True, timeout=10).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def link_sample(cfg, st, now, stamp):
+    dev = wan_device(cfg)
+    if not dev or not os.path.isdir("/sys/class/net/%s" % dev):
+        return None
+    base = "/sys/class/net/%s/" % dev
+    stats = lambda k: _int(_read(base + "statistics/" + k))
+    r = {"ts": int(now), "time": stamp, "dev": dev,
+         "operstate": _read(base + "operstate"),
+         "speed": _int(_read(base + "speed")), "duplex": _read(base + "duplex"),
+         "carrier_changes": _int(_read(base + "carrier_changes")),
+         "rx_errors": stats("rx_errors"), "tx_errors": stats("tx_errors"),
+         "rx_crc_errors": stats("rx_crc_errors"), "rx_frame_errors": stats("rx_frame_errors"),
+         "rx_missed": stats("rx_missed_errors"), "rx_dropped": stats("rx_dropped"),
+         "collisions": stats("collisions"), "align_errors": None, "tx_underrun": None}
+    # NIC-specific counters (r8169: rx_missed, align_errors, tx_underrun, ...)
+    try:
+        out = subprocess.run(["ethtool", "-S", dev], capture_output=True, text=True, timeout=10).stdout
+        e = {}
+        for line in out.splitlines():
+            m = re.match(r"\s*([\w.\-]+):\s*(\d+)\s*$", line)
+            if m:
+                e[m.group(1)] = int(m.group(2))
+        if "rx_missed" in e:
+            r["rx_missed"] = max(r["rx_missed"] or 0, e["rx_missed"])
+        r["align_errors"] = e.get("align_errors")
+        r["tx_underrun"] = e.get("tx_underrun")
+        col = e.get("tx_single_collisions", 0) + e.get("tx_multi_collisions", 0)
+        if col:
+            r["collisions"] = max(r["collisions"] or 0, col)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    boot_id = _read("/proc/sys/kernel/random/boot_id")
+    prev = st.get("link_prev") or {}
+    if prev.get("dev") != dev or prev.get("boot_id") != boot_id:
+        prev = {}  # new device or router rebooted: counters restarted, no deltas
+    def delta(keys):
+        d = 0
+        for k in keys:
+            cur, old = r.get(k), prev.get(k)
+            if cur is None or old is None:
+                continue
+            d += cur - old if cur >= old else cur  # counter reset -> count from zero
+        return d if prev else 0
+    # Cable/port faults vs NIC receive overruns (router CPU/buffer, not the cable)
+    r["err_delta"] = delta(LINK_ERR_KEYS)
+    r["missed_delta"] = delta(("rx_missed",))
+    cc, oc = r["carrier_changes"], prev.get("carrier_changes")
+    r["link_drops"] = (cc - oc + 1) // 2 if cc is not None and oc is not None and cc >= oc else 0
+    r["speed_changed"] = 1 if prev and r["speed"] != prev.get("speed") else 0
+    st["link_prev"] = {k: r.get(k) for k in ("dev", "speed", "carrier_changes", "align_errors") + ERR_KEYS}
+    st["link_prev"]["boot_id"] = boot_id
+    return r
+
+
+# --------------------------------------------------------------------------
+# Storage
+# --------------------------------------------------------------------------
+
+SUMMARY_COLS = ["ts", "time", "ok", "error", "uptime_s", "rebooted", "relock",
+                "ds_count", "ds_locked", "ds_power_min", "ds_power_max", "ds_snr_min", "ds_snr_avg",
+                "corr_total", "uncorr_total", "uncorr_delta",
+                "us_count", "us_locked", "us_power_min", "us_power_max",
+                "ping_loss", "ping_avg_ms", "ping_max_ms", "ds_power_avg", "us_power_avg"]
+CHANNEL_COLS = ["ts", "time", "dir", "ch", "lock", "mod", "freq_mhz", "power", "snr", "corr", "uncorr"]
+EVENT_COLS = ["ts", "time", "modem_date", "modem_time", "prio", "type", "message"]
+
+
+def append_csv(path, cols, rows):
+    new = not os.path.exists(path)
+    if not new:
+        with open(path, newline="") as f:
+            header = next(csv.reader(f), None)
+        if header and header != cols:
+            # A newer version added columns: rewrite the file once with the new header.
+            with open(path, newline="") as f:
+                old_rows = list(csv.DictReader(f))
+            tmp = path + ".tmp"
+            with open(tmp, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=cols + [c for c in header if c not in cols], extrasaction="ignore")
+                w.writeheader()
+                w.writerows(old_rows)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+            cols = cols + [c for c in header if c not in cols]
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        if new:
+            w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+
+def month_file(cfg, kind, ts):
+    return os.path.join(cfg["data_dir"], "%s-%s.csv" % (kind, time.strftime("%Y-%m", time.localtime(ts))))
+
+
+def prune(cfg):
+    keep = int(fnum(cfg, "retention_days"))
+    cutoff = time.strftime("%Y-%m", time.localtime(time.time() - keep * 86400))
+    for p in glob.glob(os.path.join(cfg["data_dir"], "*-????-??.csv")):
+        m = re.search(r"(\d{4}-\d{2})\.csv$", p)
+        if m and m.group(1) < cutoff:
+            os.remove(p)
+    rows = load_maint(cfg)
+    keep_rows = [r for r in rows if int(r["ts"]) >= time.time() - keep * 86400]
+    if len(keep_rows) != len(rows):
+        save_maint(cfg, keep_rows)
+
+
+# --------------------------------------------------------------------------
+# Maintenance log (manual entries, backfill, and auto-suggested entries)
+# --------------------------------------------------------------------------
+
+MAINT_COLS = ["id", "ts", "time", "end_ts", "end_time", "type", "note", "source", "status"]
+MAINT_TYPES = ("tech", "modem-reboot", "router-change", "isp-call", "outage", "other")
+
+
+def maint_path(cfg):
+    return os.path.join(cfg["data_dir"], "maintenance.csv")
+
+
+def load_maint(cfg):
+    try:
+        with open(maint_path(cfg), newline="") as f:
+            rows = list(csv.DictReader(f))
+    except OSError:
+        return []
+    return [r for r in rows if r.get("id")]
+
+
+def save_maint(cfg, rows):
+    os.makedirs(cfg["data_dir"], exist_ok=True)
+    rows = sorted(rows, key=lambda r: int(r["ts"]))
+    tmp = maint_path(cfg) + ".tmp"
+    with open(tmp, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=MAINT_COLS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, maint_path(cfg))
+
+
+def _fmt(ts):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(ts))) if ts not in (None, "") else ""
+
+
+def parse_local_time(s):
+    """'now', 'YYYY-MM-DD HH:MM[:SS]' or 'YYYY-MM-DDTHH:MM' (local time) -> epoch."""
+    s = (s or "").strip()
+    if not s or s == "now":
+        return int(time.time())
+    for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            return int(time.mktime(datetime.strptime(s, f).timetuple()))
+        except ValueError:
+            pass
+    raise ValueError("unrecognised time %r (use YYYY-MM-DD HH:MM)" % s)
+
+
+def add_maint(cfg, ts, mtype, note, source="manual", status="confirmed", end_ts=None, rows=None):
+    own = rows is None
+    rows = load_maint(cfg) if own else rows
+    if mtype not in MAINT_TYPES:
+        raise ValueError("type must be one of: " + ", ".join(MAINT_TYPES))
+    nid = max([int(r["id"]) for r in rows] + [0]) + 1
+    row = {"id": nid, "ts": int(ts), "time": _fmt(ts), "end_ts": int(end_ts) if end_ts else "",
+           "end_time": _fmt(end_ts) if end_ts else "", "type": mtype,
+           "note": " ".join(str(note).split())[:500], "source": source, "status": status}
+    rows.append(row)
+    if own:
+        save_maint(cfg, rows)
+    return row
+
+
+def suggest(cfg, st, ts, mtype, note, end_ts=None):
+    """Auto entry, shown as 'suggested' until confirmed or edited."""
+    try:
+        row = add_maint(cfg, ts, mtype, note, source="auto", status="suggested", end_ts=end_ts)
+        log("suggested maintenance entry #%s: %s" % (row["id"], note))
+        return row
+    except (OSError, ValueError) as e:
+        log("could not add suggestion: %s" % e)
+        return None
+
+
+def extend_maint(cfg, mid, end_ts, note=None):
+    rows = load_maint(cfg)
+    for r in rows:
+        if str(r["id"]) == str(mid):
+            r["end_ts"], r["end_time"] = int(end_ts), _fmt(end_ts)
+            if note:
+                r["note"] = note
+            save_maint(cfg, rows)
+            return True
+    return False
+
+
+def auto_suggest(cfg, st, row, now, uptime, new_events):
+    interval = int(fnum(cfg, "interval"))
+    prev_ts = st.get("last_ok_ts")
+
+    # 1. Modem reboot (uptime went backwards)
+    if row.get("rebooted") == 1 and uptime is not None:
+        boot = int(now - uptime)
+        issued = [r for r in load_maint(cfg) if r["type"] == "modem-reboot" and r["source"] == "router"
+                  and abs(int(r["ts"]) - boot) < 1800]
+        if not issued:
+            suggest(cfg, st, boot, "modem-reboot", "Modem rebooted (uptime reset); not issued from this router")
+
+    # 2. Loss of signal / re-registration without a reboot
+    reg = [e for e in new_events if e["type"] in ("PROVISION", "T4", "SYNC")
+           and prev_ts and int(e["ts"]) > prev_ts - 60]
+    if reg and row.get("rebooted") != 1:
+        row["relock"] = 1
+    if row.get("relock") == 1:
+        start = min([int(e["ts"]) for e in reg] + [prev_ts or int(now)])
+        o = st.get("open_relock")
+        if o and int(o["end"]) >= start - (2 * interval + 60):
+            o["end"] = int(now)
+            extend_maint(cfg, o["id"], now)
+        else:
+            r = suggest(cfg, st, start, "outage",
+                        "Lost signal / re-registered (no modem reboot; uptime kept counting)", end_ts=now)
+            if r:
+                st["open_relock"] = {"id": r["id"], "end": int(now)}
+
+    # 3. Level shift: median power, hour before vs hour after, >= 1.5 dB
+    if row.get("ok") == 1 and row.get("ds_power_avg") not in ("", None):
+        lv = st.get("levels", [])
+        lv.append([int(now), row["ds_power_avg"], row.get("us_power_avg") or None])
+        lv = [x for x in lv if x[0] >= now - 3 * 3600][-24:]
+        st["levels"] = lv
+        if len(lv) == 24 and lv[-1][0] - lv[0][0] <= 2.5 * 3600 and now - st.get("last_shift", 0) > 2 * 3600:
+            med = lambda xs: sorted(xs)[len(xs) // 2]
+            msgs = []
+            for idx, name in ((1, "downstream"), (2, "upstream")):
+                b = [x[idx] for x in lv[:12] if x[idx] is not None]
+                a = [x[idx] for x in lv[12:] if x[idx] is not None]
+                if len(b) >= 8 and len(a) >= 8 and abs(med(a) - med(b)) >= 1.5:
+                    msgs.append("%s %+.1f dB (%.1f -> %.1f dBmV)" % (name, med(a) - med(b), med(b), med(a)))
+            if msgs:
+                suggest(cfg, st, lv[12][0], "other", "Signal level shift: " + "; ".join(msgs))
+                st["last_shift"] = int(now)
+
+    # 4. Router reboot (first poll after the router booted)
+    boot_id = _read("/proc/sys/kernel/random/boot_id")
+    if boot_id and st.get("router_boot_id") != boot_id:
+        try:
+            up = float(_read("/proc/uptime").split()[0])
+        except (ValueError, IndexError):
+            up = None
+        if st.get("router_boot_id") and up is not None and up < 3600:
+            suggest(cfg, st, int(now - up), "router-change", "Router rebooted")
+        st["router_boot_id"] = boot_id
+
+    if row.get("ok") == 1:
+        st["last_ok_ts"] = int(now)
+
+
+# --------------------------------------------------------------------------
+# Poll
+# --------------------------------------------------------------------------
+
+def rnd(v, n=1):
+    return None if v is None else round(v, n)
+
+
+def poll(cfg):
+    os.makedirs(cfg["data_dir"], exist_ok=True)
+    st = load_state(cfg)
+    now = time.time()
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    row = {"ts": int(now), "time": stamp, "ok": 0, "error": "", "rebooted": 0}
+
+    # Ping first, so it reflects the line, not the polling itself.
+    losses, avgs, maxs = [], [], []
+    for t in cfg["ping_targets"].split():
+        lo, av, mx = ping(t, int(fnum(cfg, "ping_count")))
+        if lo is not None:
+            losses.append(lo)
+        if av is not None:
+            avgs.append(av)
+            maxs.append(mx)
+    row["ping_loss"] = rnd(sum(losses) / len(losses)) if losses else ""
+    row["ping_avg_ms"] = rnd(sum(avgs) / len(avgs)) if avgs else ""
+    row["ping_max_ms"] = rnd(max(maxs)) if maxs else ""
+
+    modem = S33(cfg, st)
+    events_new = []
+    try:
+        resp = modem.call(["GetCustomerStatusDownstreamChannelInfo",
+                           "GetCustomerStatusUpstreamChannelInfo",
+                           "GetCustomerStatusConnectionInfo"])
+        ds = parse_downstream(resp.get("GetCustomerStatusDownstreamChannelInfoResponse", {})
+                              .get("CustomerConnDownstreamChannel"))
+        us = parse_upstream(resp.get("GetCustomerStatusUpstreamChannelInfoResponse", {})
+                            .get("CustomerConnUpstreamChannel"))
+        uptime = parse_uptime(resp.get("GetCustomerStatusConnectionInfoResponse"))
+        if not ds and not us:
+            raise ModemError("modem returned no channel data")
+        row["ok"] = 1
+        row["uptime_s"] = uptime if uptime is not None else ""
+
+        sc = [c for c in ds if "ofdm" not in c["mod"].lower()]
+        dsp = [c["power"] for c in ds if c["power"] is not None]
+        snr = [c["snr"] for c in sc if c["snr"] is not None]
+        usp = [c["power"] for c in us if c["power"] is not None]
+        corr = sum(c["corr"] for c in ds)
+        unc = sum(c["uncorr"] for c in ds)
+        row.update(ds_count=len(ds), ds_locked=sum(1 for c in ds if c["lock"].lower() == "locked"),
+                   ds_power_min=rnd(min(dsp)) if dsp else "", ds_power_max=rnd(max(dsp)) if dsp else "",
+                   ds_snr_min=rnd(min(snr)) if snr else "",
+                   ds_snr_avg=rnd(sum(snr) / len(snr)) if snr else "",
+                   corr_total=corr, uncorr_total=unc,
+                   us_count=len(us), us_locked=sum(1 for c in us if c["lock"].lower() == "locked"),
+                   us_power_min=rnd(min(usp)) if usp else "", us_power_max=rnd(max(usp)) if usp else "")
+
+        row["ds_power_avg"] = rnd(sum(dsp) / len(dsp), 2) if dsp else ""
+        row["us_power_avg"] = rnd(sum(usp) / len(usp), 2) if usp else ""
+
+        # Reboot = uptime went backwards. Counters resetting while uptime keeps
+        # climbing = the modem lost signal and re-registered (no reboot).
+        prev_unc, prev_up = st.get("last_uncorr"), st.get("last_uptime")
+        counters_reset = prev_unc is not None and unc < prev_unc
+        if uptime is not None and prev_up is not None:
+            rebooted = uptime + 120 < prev_up
+        else:
+            rebooted = counters_reset  # no uptime available: best guess
+        unlocked = bool(ds) and all(c["lock"].lower() != "locked" for c in ds)
+        row["rebooted"] = 1 if rebooted else 0
+        row["relock"] = 1 if (not rebooted and (counters_reset or unlocked)) else 0
+        if prev_unc is None:
+            row["uncorr_delta"] = 0
+        elif counters_reset or rebooted:
+            row["uncorr_delta"] = unc
+        else:
+            row["uncorr_delta"] = unc - prev_unc
+        st["last_uncorr"], st["last_uptime"] = unc, uptime
+        if uptime is not None:
+            est = int(now - uptime)
+            if rebooted or abs(est - st.get("boot_ts", 0)) > 600:
+                st["boot_ts"] = est
+        boot_ts = st.get("boot_ts")
+        migrate_102(cfg, st, boot_ts)
+
+        if now - st.get("modem_info", {}).get("ts", 0) > 86400:
+            try:
+                sw = modem.call(["GetCustomerStatusSoftware"]).get("GetCustomerStatusSoftwareResponse", {})
+                st["modem_info"] = {"ts": int(now), "model": sw.get("StatusSoftwareModelName", ""),
+                                    "firmware": sw.get("StatusSoftwareSfVer", ""),
+                                    "hardware": sw.get("StatusSoftwareHdVer", "")}
+            except ModemError:
+                pass
+
+        chrows = []
+        for d, chans in (("down", ds), ("up", us)):
+            for c in chans:
+                chrows.append({"ts": int(now), "time": stamp, "dir": d, "ch": c["ch"], "lock": c["lock"],
+                               "mod": c["mod"], "freq_mhz": c["freq"], "power": c["power"],
+                               "snr": c.get("snr", ""), "corr": c.get("corr", ""),
+                               "uncorr": c.get("uncorr", "")})
+        append_csv(month_file(cfg, "channels", now), CHANNEL_COLS, chrows)
+
+        # Event log (separate request; some firmware may not support it)
+        try:
+            lr = modem.call(["GetCustomerStatusLog"]).get("GetCustomerStatusLogResponse", {})
+            seen = st.get("seen_events", [])
+            seen_set = set(seen)
+            for ev in parse_events(lr):
+                key = event_key(ev, boot_ts)
+                if key in seen_set:
+                    continue
+                seen_set.add(key)
+                seen.append(key)
+                ets = event_ts(ev, now, boot_ts)
+                events_new.append({"ts": ets, "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ets)),
+                                   "modem_date": ev["date"], "modem_time": ev["time"], "prio": ev["prio"],
+                                   "type": classify(ev["msg"]), "message": ev["msg"]})
+            st["seen_events"] = seen[-3000:]
+        except ModemError as e:
+            log("event log unavailable: %s" % e)
+    except ModemError as e:
+        row["error"] = str(e)[:200]
+        log(str(e))
+
+    try:
+        lk = link_sample(cfg, st, now, stamp)
+        if lk:
+            append_csv(month_file(cfg, "link", now), LINK_COLS, [lk])
+            row["link"] = {k: lk[k] for k in ("dev", "speed", "operstate", "err_delta", "missed_delta", "link_drops")}
+    except Exception as e:
+        log("link stats error: %r" % e)
+
+    try:
+        auto_suggest(cfg, st, row, now, row.get("uptime_s") if row.get("uptime_s") != "" else None, events_new)
+    except Exception as e:
+        log("auto-suggest error: %r" % e)
+
+    append_csv(month_file(cfg, "summary", now), SUMMARY_COLS, [row])
+    if events_new:
+        append_csv(os.path.join(cfg["data_dir"], "events.csv"), EVENT_COLS, events_new)
+    save_state(cfg, st)
+    write_latest(cfg, row)
+    return row
+
+
+def write_latest(cfg, row):
+    os.makedirs(cfg["web_dir"], exist_ok=True)
+    tmp = os.path.join(cfg["web_dir"], "latest.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(row, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, os.path.join(cfg["web_dir"], "latest.json"))
+
+
+# --------------------------------------------------------------------------
+# Report
+# --------------------------------------------------------------------------
+
+def read_csvs(paths, since):
+    rows = []
+    for p in sorted(paths):
+        try:
+            with open(p, newline="") as f:
+                for r in csv.DictReader(f):
+                    try:
+                        if int(r["ts"]) >= since:
+                            rows.append(r)
+                    except (KeyError, ValueError):
+                        pass
+        except OSError:
+            pass
+    rows.sort(key=lambda r: int(r["ts"]))
+    return rows
+
+
+def files_since(cfg, kind, since):
+    first = time.strftime("%Y-%m", time.localtime(since))
+    return [p for p in glob.glob(os.path.join(cfg["data_dir"], kind + "-????-??.csv"))
+            if re.search(r"(\d{4}-\d{2})\.csv$", p).group(1) >= first]
+
+
+def fv(r, k):
+    try:
+        v = r.get(k, "")
+        return float(v) if v not in ("", None) else None
+    except ValueError:
+        return None
+
+
+def bucketize(points, bucket, how):
+    """points: list of (ts, value). Returns [(bucket_start, agg)]."""
+    if bucket <= 0:
+        return [(t, v) for t, v in points if v is not None]
+    out, cur, vals = [], None, []
+    for t, v in points:
+        b = t - t % bucket
+        if b != cur:
+            if vals:
+                out.append((cur, agg(vals, how)))
+            cur, vals = b, []
+        if v is not None:
+            vals.append(v)
+    if vals:
+        out.append((cur, agg(vals, how)))
+    return out
+
+
+def agg(vals, how):
+    if how == "max":
+        return max(vals)
+    if how == "min":
+        return min(vals)
+    if how == "sum":
+        return sum(vals)
+    return round(sum(vals) / len(vals), 2)
+
+
+RANGES = [("24h", 86400, 0), ("7d", 7 * 86400, 1800), ("30d", 30 * 86400, 7200)]
+
+
+SETUP_ERRORS = ("no modem password", "login failed", "modem rejected login")
+
+
+def modem_down(r):
+    """A failed sample that reflects the line/modem, not our own setup
+    (missing or wrong password are excluded from outage statistics)."""
+    if r.get("ok") == "1":
+        return False
+    err = (r.get("error") or "").lower()
+    return not any(e in err for e in SETUP_ERRORS)
+
+
+def build_report(cfg):
+    now = int(time.time())
+    longest = max(r[1] for r in RANGES)
+    since = now - longest
+    summ = read_csvs(files_since(cfg, "summary", since), since)
+    chans = [r for r in read_csvs(files_since(cfg, "channels", since), since) if r.get("dir") == "up"]
+    events = read_csvs([os.path.join(cfg["data_dir"], "events.csv")], since)
+    links = read_csvs(files_since(cfg, "link", since), since)
+    interval = int(fnum(cfg, "interval"))
+
+    data = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"), "now": now, "interval": interval,
+            "report_interval": max(60, int(fnum(cfg, "report_interval"))),
+            "thresholds": {k: fnum(cfg, k) for k in
+                           ("us_power_min", "us_power_max", "ds_power_min", "ds_power_max", "ds_snr_min")},
+            "ranges": {}}
+
+    us_ids = sorted({r["ch"] for r in chans}, key=lambda x: (num(x) or 0, x))[:8]
+
+    # Reboot = uptime went backwards; re-registration = counters reset (or the
+    # modem logged registration trouble) while uptime kept counting. Derived from
+    # history so rows written by older versions are classified the same way.
+    prev_up = None
+    for r in summ:
+        up = fv(r, "uptime_s")
+        stored = r.get("rebooted") == "1"
+        reb = (up + 120 < prev_up) if (up is not None and prev_up is not None) else stored
+        r["_reb"] = reb
+        r["_rel"] = (r.get("relock") == "1" or stored) and not reb
+        if up is not None:
+            prev_up = up
+    # Link counters: recomputed from the cumulative columns. Cable/port errors and
+    # NIC receive overruns (rx_missed: router CPU/buffer) are kept apart.
+    prevl = {}
+    for r in links:
+        pr = prevl.get(r.get("dev"))
+        tot = lambda x: sum(int(fv(x, k) or 0) for k in LINK_ERR_KEYS)
+        r["_err"] = max(0, tot(r) - tot(pr)) if pr else 0
+        r["_missed"] = max(0, int(fv(r, "rx_missed") or 0) - int(fv(pr, "rx_missed") or 0)) if pr else 0
+        prevl[r.get("dev")] = r
+
+    for name, span, bucket in RANGES:
+        lo = now - span
+        s = [r for r in summ if int(r["ts"]) >= lo]
+        c = [r for r in chans if int(r["ts"]) >= lo]
+        ev = [e for e in events if int(e["ts"]) >= lo]
+        lk = [r for r in links if int(r["ts"]) >= lo]
+        b = bucket
+        series = {
+            "us_power": [{"name": "Ch %s" % ch, "pts": bucketize(
+                [(int(r["ts"]), fv(r, "power")) for r in c if r["ch"] == ch], b, "max")} for ch in us_ids],
+            "ds_snr": [{"name": "Lowest channel", "pts": bucketize([(int(r["ts"]), fv(r, "ds_snr_min")) for r in s], b, "min")},
+                       {"name": "Average", "pts": bucketize([(int(r["ts"]), fv(r, "ds_snr_avg")) for r in s], b, "avg")}],
+            "ds_power": [{"name": "Highest channel", "pts": bucketize([(int(r["ts"]), fv(r, "ds_power_max")) for r in s], b, "max")},
+                         {"name": "Lowest channel", "pts": bucketize([(int(r["ts"]), fv(r, "ds_power_min")) for r in s], b, "min")}],
+            "uncorr": [{"name": "Uncorrectable codewords", "pts": bucketize([(int(r["ts"]), fv(r, "uncorr_delta")) for r in s], b, "sum")}],
+            "loss": [{"name": "Packet loss %", "pts": bucketize([(int(r["ts"]), fv(r, "ping_loss")) for r in s], b, "max")}],
+            "latency": [{"name": "Average ping", "pts": bucketize([(int(r["ts"]), fv(r, "ping_avg_ms")) for r in s], b, "avg")}],
+            "link_err": [{"name": "Link errors", "pts": bucketize([(int(r["ts"]), r["_err"]) for r in lk], b, "sum")}],
+            "missed": [{"name": "Missed packets", "pts": bucketize([(int(r["ts"]), r["_missed"]) for r in lk], b, "sum")}],
+        }
+        failed = [r for r in s if modem_down(r)]
+        reboots = [r for r in s if r["_reb"]]
+        usmax = [fv(r, "us_power_max") for r in s if fv(r, "us_power_max") is not None]
+        tiles = {
+            "T3": sum(1 for e in ev if e["type"] == "T3"),
+            "T4": sum(1 for e in ev if e["type"] == "T4"),
+            "DRW": sum(1 for e in ev if e["type"] == "DRW"),
+            "uncorr": int(sum(fv(r, "uncorr_delta") or 0 for r in s)),
+            "us_max": max(usmax) if usmax else None,
+            "reboots": len(reboots),
+            "relocks": sum(1 for r in s if r["_rel"]),
+            "failed": len(failed),
+            "loss_polls": sum(1 for r in s if (fv(r, "ping_loss") or 0) > 0),
+            "polls": len(s),
+            "link_err": int(sum(r["_err"] for r in lk)),
+            "missed": int(sum(r["_missed"] for r in lk)),
+            "missed_flag": any(r["_missed"] > 100 for r in lk),
+            "link_drops": int(sum(fv(r, "link_drops") or 0 for r in lk)),
+            "link_dev": lk[-1]["dev"] if lk else "",
+            "link_speed": lk[-1]["speed"] if lk else "",
+            "link_on": bool(lk),
+        }
+        data["ranges"][name] = {"bucket": b, "series": series, "tiles": tiles, "span": span}
+
+    # Daily table (30 days)
+    days = {}
+    for i in range(30):
+        d = time.strftime("%Y-%m-%d", time.localtime(now - i * 86400))
+        days[d] = {"T3": 0, "T4": 0, "SYNC": 0, "PROVISION": 0, "DRW": 0, "uncorr": 0, "reboots": 0, "failed": 0, "loss": 0, "polls": 0, "us_max": None, "link_err": 0, "link_drops": 0, "relocks": 0, "missed": 0}
+    for e in events:
+        d = e["time"][:10]
+        if d in days and e["type"] in ("T3", "T4", "SYNC", "PROVISION", "DRW"):
+            days[d][e["type"]] += 1
+    for r in summ:
+        d = r["time"][:10]
+        if d not in days:
+            continue
+        x = days[d]
+        x["polls"] += 1
+        x["uncorr"] += int(fv(r, "uncorr_delta") or 0)
+        x["reboots"] += 1 if r["_reb"] else 0
+        x["relocks"] += 1 if r["_rel"] else 0
+        x["failed"] += 1 if modem_down(r) else 0
+        x["loss"] += 1 if (fv(r, "ping_loss") or 0) > 0 else 0
+        u = fv(r, "us_power_max")
+        if u is not None:
+            x["us_max"] = u if x["us_max"] is None else max(x["us_max"], u)
+    for r in links:
+        d = r["time"][:10]
+        if d in days:
+            days[d]["link_err"] += r["_err"]
+            days[d]["missed"] += r["_missed"]
+            days[d]["link_drops"] += int(fv(r, "link_drops") or 0)
+    data["days"] = [dict(day=k, **v) for k, v in sorted(days.items(), reverse=True)]
+
+    # Compact per-sample rows so the page can recount everything from any start
+    # time (the "since maintenance entry" filter).
+    daylist = sorted({r["time"][:10] for r in summ} | {e["time"][:10] for e in events}
+                     | {r["time"][:10] for r in links})
+    di = {d: i for i, d in enumerate(daylist)}
+    data["daylist"] = daylist
+    data["samples"] = [[int(r["ts"]), 1 if modem_down(r) else 0, 1 if r["_reb"] else 0, 1 if r["_rel"] else 0,
+                        int(fv(r, "uncorr_delta") or 0) if r.get("ok") == "1" else 0, fv(r, "us_power_max"),
+                        fv(r, "ping_loss"), di[r["time"][:10]]] for r in summ]
+    data["evc"] = [[int(e["ts"]), e["type"], di[e["time"][:10]]] for e in events
+                   if e["type"] in ("T3", "T4", "SYNC", "PROVISION", "DRW")]
+    data["lk"] = [[int(r["ts"]), r["_err"], r["_missed"], int(fv(r, "link_drops") or 0), di[r["time"][:10]]]
+                  for r in links]
+    data["link_info"] = {"dev": links[-1].get("dev", ""), "speed": links[-1].get("speed", "")} if links else {}
+    data["isp"] = cfg.get("isp_name", "").strip()
+    data["title"] = cfg.get("report_title", "").strip()
+    data["note"] = cfg.get("report_note", "").strip()
+    data.pop("days", None)  # the page builds the daily table itself (see "samples")
+
+    # Outages: consecutive failed polls or 100% loss, grouped
+    outs, cur = [], None
+    for r in summ:
+        bad = modem_down(r) or (fv(r, "ping_loss") or 0) >= 100
+        t = int(r["ts"])
+        if bad:
+            why = r.get("error") or "100% packet loss"
+            if cur and t - cur["end"] <= interval * 2 + 60:
+                cur["end"] = t
+                cur["polls"] += 1
+            else:
+                cur = {"start": t, "end": t, "polls": 1, "why": why}
+                outs.append(cur)
+        else:
+            cur = None
+    for r in summ:
+        if r["_reb"]:
+            outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0, "why": "Modem rebooted (uptime reset)"})
+        elif r["_rel"]:
+            outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
+                         "why": "Modem lost signal and re-registered (no reboot; uptime kept counting)"})
+    for r in links:
+        n = int(fv(r, "link_drops") or 0)
+        if n:
+            outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
+                         "why": "Router-to-modem Ethernet link (%s) went down %d time%s"
+                                % (r["dev"], n, "" if n == 1 else "s")})
+        if r.get("speed_changed") == "1":
+            outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
+                         "why": "Link speed on %s changed to %s Mb/s" % (r["dev"], r.get("speed") or "?")})
+        e = r["_err"]
+        if e:
+            outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
+                         "why": "%d Ethernet error%s on %s (CRC/alignment/collisions)" % (e, "" if e == 1 else "s", r["dev"])})
+        if r["_missed"] > 100:
+            outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
+                         "why": "%d packets missed by %s (NIC receive overrun: router CPU/buffer, not the cable)"
+                                % (r["_missed"], r["dev"])})
+    outs.sort(key=lambda o: o["start"], reverse=True)
+    data["incidents"] = [{"ts": o["start"], "start": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["start"])),
+                          "end": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["end"])),
+                          "mins": round((o["end"] - o["start"]) / 60 + (interval / 60 if o["polls"] else 0)),
+                          "why": o["why"]} for o in outs[:200]]
+
+    data["events"] = [{"ts": int(e["ts"]), "time": e["time"], "type": e["type"], "prio": e["prio"], "msg": e["message"]}
+                      for e in reversed(events) if e["type"] != "LOGIN"][:300]
+
+    last = summ[-1] if summ else {}
+    data["latest"] = {k: v for k, v in last.items() if not k.startswith("_")}
+    data["modem_info"] = load_state(cfg).get("modem_info", {})
+
+    # Maintenance log + 24 h before/after summary
+    def window(lo, hi):
+        rows = [r for r in summ if lo <= int(r["ts"]) < hi]
+        okr = [r for r in rows if r.get("ok") == "1"]
+        if not okr:
+            return None
+        med = lambda k: (lambda v: sorted(v)[len(v) // 2] if v else None)([fv(r, k) for r in okr if fv(r, k) is not None])
+        hrs = (int(rows[-1]["ts"]) - int(rows[0]["ts"]) + interval) / 3600.0
+        unc = sum(int(fv(r, "uncorr_delta") or 0) for r in okr)
+        ev = [e for e in events if lo <= int(e["ts"]) < hi]
+        return {"ds": [med("ds_power_min"), med("ds_power_max")], "us": [med("us_power_min"), med("us_power_max")],
+                "uncorr_day": round(unc * 24 / hrs) if hrs >= 1 else None, "hours": round(hrs, 1),
+                "t3t4": sum(1 for e in ev if e["type"] in ("T3", "T4")),
+                "drw": sum(1 for e in ev if e["type"] == "DRW")}
+    mrows = sorted(load_maint(cfg), key=lambda r: int(r["ts"]))
+    maint = []
+    for i, r in enumerate(mrows, 1):
+        t0 = int(r["ts"])
+        t1 = int(r["end_ts"]) if r.get("end_ts") else t0
+        maint.append({"n": i, "id": r["id"], "ts": t0, "end": t1 if t1 > t0 else None,
+                      "time": r["time"][:16], "end_time": r.get("end_time", "")[:16], "type": r["type"],
+                      "note": r["note"], "source": r["source"], "status": r["status"],
+                      "before": window(t0 - 86400, t0), "after": window(t1, t1 + 86400)})
+    data["maint"] = maint
+
+    # Downloads: link CSVs (never state.json, which holds the session key)
+    web = cfg["web_dir"]
+    dl = os.path.join(web, "data")
+    os.makedirs(dl, exist_ok=True)
+    for d in (web, dl):
+        os.chmod(d, 0o755)
+    for p in glob.glob(os.path.join(cfg["data_dir"], "*.csv")):
+        os.chmod(p, 0o644)  # symlinked into the web dir for download
+    for p in glob.glob(os.path.join(dl, "*.csv")):
+        os.remove(p)
+    files = []
+    for p in sorted(glob.glob(os.path.join(cfg["data_dir"], "*.csv")), reverse=True):
+        n = os.path.basename(p)
+        try:
+            os.symlink(p, os.path.join(dl, n))
+        except OSError:
+            shutil.copy(p, os.path.join(dl, n))
+        files.append({"name": n, "kb": round(os.path.getsize(p) / 1024)})
+    data["files"] = files
+
+    page = HTML.replace("/*__DATA__*/null", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    tmp = os.path.join(web, "index.html.tmp")
+    with open(tmp, "w") as f:
+        f.write(page)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, os.path.join(web, "index.html"))
+    return os.path.join(web, "index.html")
+
+
+HTML = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cable modem signal report</title>
+<style>
+.viz-root{color-scheme:light;--surface-0:#f4f4f2;--surface-1:#fcfcfb;--border:#e3e2de;--grid:#ecebe7;
+--text-primary:#0b0b0b;--text-secondary:#52514e;--text-muted:#77766f;--band:rgba(12,163,12,.08);--band-line:rgba(12,163,12,.45);
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#6250d6;--s8:#e34948;
+--critical:#d03b3b;--warning:#b77d00;--good:#0a7f0a}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme=light])) .viz-root{color-scheme:dark;--surface-0:#121211;--surface-1:#1a1a19;--border:#2e2e2b;--grid:#262624;
+--text-primary:#f0efec;--text-secondary:#c3c2b7;--text-muted:#8f8e86;--band:rgba(12,163,12,.12);--band-line:rgba(12,163,12,.6);
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#0ca30c;--s7:#9085e9;--s8:#e66767;--critical:#e66767;--warning:#fab219;--good:#0ca30c}}
+*{box-sizing:border-box}body{margin:0}
+.viz-root{background:var(--surface-0);color:var(--text-primary);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:16px;min-height:100vh}
+h1{font-size:20px;margin:0 0 2px}h2{font-size:15px;margin:0 0 2px}
+.sub{color:var(--text-secondary);font-size:13px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface-1)}
+.seg button{border:0;background:none;color:var(--text-secondary);padding:6px 14px;font:inherit;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--text-primary);color:var(--surface-1)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.tile{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+.tile .k{font-size:12px;color:var(--text-secondary)}.tile .v{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}
+.tile .n{font-size:12px;color:var(--text-muted)}
+.tile.bad .v::before{content:"\25B2 ";font-size:13px;color:var(--critical)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(460px,1fr));gap:12px}
+.card{background:var(--surface-1);border:1px solid var(--border);border-radius:10px;padding:12px 12px 6px;position:relative}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--text-secondary);margin:4px 0 2px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+svg{display:block;width:100%;height:auto;overflow:visible}
+.axis text{fill:var(--text-muted);font-size:11px}.gl{stroke:var(--grid)}
+.tip{position:absolute;pointer-events:none;background:var(--surface-1);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.15);display:none;white-space:nowrap;z-index:5}
+.tip b{font-weight:600}.tip i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
+table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--grid)}th{color:var(--text-secondary);font-weight:600;position:sticky;top:0;background:var(--surface-1)}
+td.num,th.num{text-align:right}td:first-child,th:first-child{white-space:nowrap}.scroll{max-height:380px;overflow:auto}
+.flag{color:var(--critical);font-weight:600}
+.mk{font-size:12px;color:var(--text-secondary);margin:-4px 0 10px}
+.badge{display:inline-block;font-size:11px;padding:1px 6px;border-radius:9px;border:1px solid var(--border);color:var(--text-secondary)}
+#maint td:nth-child(3){white-space:nowrap}
+#maint a.sl{font-size:12px;cursor:pointer;margin-left:4px;white-space:nowrap}
+#maint tr.sel td{background:color-mix(in srgb,var(--s1) 10%,transparent)}
+.ba{font-size:12px;color:var(--text-secondary);white-space:nowrap}
+select#since{font:inherit;padding:5px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface-1);color:var(--text-primary);max-width:420px}
+.since{display:none;margin:-4px 0 12px;padding:8px 12px;border:1px solid var(--border);border-left:3px solid var(--s1);border-radius:8px;background:var(--surface-1);font-size:13px}
+.since a{cursor:pointer}
+.stale{margin-top:8px;color:var(--critical);font-weight:600;font-size:13px}
+.section{margin-top:14px}.empty{color:var(--text-muted);padding:20px 4px}
+a{color:var(--s1)}
+details summary{cursor:pointer;color:var(--text-secondary);font-size:13px;margin:4px 0}
+</style></head>
+<body><div class="viz-root">
+<h1 id="h1">Cable modem signal report</h1>
+<div class="sub" id="gen"></div>
+<div class="bar"><span class="sub">Time range</span><div class="seg" id="rng"></div><span class="sub" style="margin-left:12px">Show data since</span><select id="since"></select></div>
+<div class="since" id="sinceBanner"></div>
+<div class="tiles" id="tiles"></div>
+<div class="mk" id="mk"></div>
+<div class="grid" id="charts"></div>
+<div class="card section"><h2>Maintenance log</h2><div class="sub">Repairs, calls, reboots and router changes, numbered to match the dashed markers on the charts. "Before" and "after" are the 24 hours on each side (median power range, uncorrectables per day, T3/T4 timeouts, upstream power warnings). Add or edit entries on the router's <b>Maintenance Log</b> tab or with <code>modem-monitor mark</code>.</div><div class="scroll"><table id="maint"></table></div></div>
+<div class="card section"><h2 id="daysTitle">Daily summary (last 30 days)</h2><div class="sub">Counts from the modem event log and from this router's polls. Rows with trouble are marked.</div><div class="scroll"><table id="days"></table></div></div>
+<div class="card section"><h2>Incidents</h2><div class="sub">Times the modem couldn't be reached, pings failed completely, or the modem rebooted.</div><div class="scroll"><table id="inc"></table></div></div>
+<div class="card section"><h2>Modem event log</h2><div class="sub">New log entries collected since monitoring began. Login entries from this monitor are hidden.</div><div class="scroll"><table id="ev"></table></div></div>
+<div class="card section"><h2>Raw data (CSV)</h2><div class="sub">Download these and attach them to a complaint or ticket. To get everything in one file, use <b>Download all data</b> on the router's Cable Modem page, or run <code>modem-monitor export</code>.</div><div id="files"></div></div>
+</div>
+<script>
+const D=/*__DATA__*/null;
+const $=s=>document.querySelector(s),esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const T=D.thresholds;let R=localStorage&&(()=>{try{return localStorage.getItem("mm-range")}catch(e){return null}})()||"7d";
+if(!D.ranges[R])R="7d";
+const ls=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}};
+const startOfEntry=m=>m.end||m.ts;
+let SINCE=+(ls("mm-since")||0);if(SINCE&&!(D.maint||[]).some(m=>startOfEntry(m)===SINCE))SINCE=0;
+{const t=D.title||("Cable modem signal report"+(D.isp?" \u2013 "+D.isp:""));document.title=t;$("#h1").textContent=t;
+ if(D.note){const n=document.createElement("div");n.className="sub";n.style.marginBottom="2px";n.textContent=D.note;$("#h1").after(n)}}
+(()=>{const L=D.latest||{},mins=v=>Math.round(v/60),fmt=t=>new Date(t*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+ const parts=[];if(L.ts){parts.push("Newest sample "+fmt(+L.ts)+(L.ok==="1"?"":" (modem unreachable: "+(L.error||"?")+")"))}else{parts.push("No samples yet")}
+ parts.push("report built "+fmt(D.now));
+ const MI=D.modem_info||{};if(MI.model)parts.push(MI.model+" firmware "+(MI.firmware||"?"));
+ parts.push(D.report_interval>D.interval?"a sample every "+mins(D.interval)+" min, report rebuilt every "+mins(D.report_interval)+" min":"a sample every "+mins(D.interval)+" min");
+ $("#gen").textContent=parts.join(" \u00b7 ");
+ if(L.ts){const age=Date.now()/1000-(+L.ts),lim=Math.max(D.interval,D.report_interval)*2+120;if(age>lim){const w=document.createElement("div");w.className="stale";const ago=age<5400?mins(age)+" minutes":age<172800?Math.round(age/3600)+" hours":Math.round(age/86400)+" days";w.textContent="\u25B2 No new samples for "+ago+". Check that the modem-monitor service is running.";$("#gen").after(w)}}})();
+const CH=[
+ {id:"us_power",title:"Upstream transmit power",unit:"dBmV",band:[T.us_power_min,T.us_power_max],note:"Per channel. Power climbing toward the top of the range usually means signal loss in the line or tap. Above the range means the modem is shouting to be heard.",how:"max"},
+ {id:"ds_snr",title:"Downstream SNR",unit:"dB",band:[T.ds_snr_min,null],note:"SC-QAM channels. Dips below the line indicate noise on the line.",how:"min"},
+ {id:"ds_power",title:"Downstream receive power",unit:"dBmV",band:[T.ds_power_min,T.ds_power_max],note:"Highest and lowest channel.",how:""},
+ {id:"uncorr",title:"Uncorrectable codewords",unit:"per interval",bars:true,note:"Data the modem received too damaged to repair. Spikes line up with noise or ingress."},
+ {id:"loss",title:"Packet loss",unit:"%",bars:true,note:"Pings from this router to the internet."},
+ {id:"latency",title:"Ping latency",unit:"ms",note:"Average round-trip time."},
+ {id:"link_err",title:"Router\u2013modem Ethernet errors",unit:"per interval",bars:true,note:"CRC, alignment and collision counters on the router's WAN port. Should stay at zero; errors here point to the router\u2013modem cable or ports, not "+(D.isp||"your ISP")+"."},
+ {id:"missed",title:"Router NIC missed packets",unit:"per interval",bars:true,note:"Packets the router's WAN port dropped because its receive buffer filled (router CPU/IRQ load). A router tuning issue, not a line or cable fault."}];
+const fmtT=(t,span)=>{const d=new Date(t*1000);return span<=86400*1.2?d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):span<=86400*4?d.toLocaleDateString([], {month:"short",day:"numeric"})+" "+d.toLocaleTimeString([], {hour:"numeric"}):d.toLocaleDateString([], {month:"short",day:"numeric"})};
+const fmtFull=t=>new Date(t*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+function nice(lo,hi,n){if(lo===hi){lo-=1;hi+=1}const s=Math.pow(10,Math.floor(Math.log10((hi-lo)/n)));const st=[1,2,2.5,5,10].map(m=>m*s).find(x=>(hi-lo)/x<=n)||s*10;const a=Math.floor(lo/st)*st,b=Math.ceil(hi/st)*st,t=[];for(let v=a;v<=b+st/2;v+=st)t.push(+v.toFixed(6));return t}
+function chart(c,rg){
+ const card=document.createElement("div");card.className="card";
+ const X0=Math.max(D.now-rg.span,SINCE||0);
+ const ser=rg.series[c.id].map((s,i)=>({name:s.name,ci:i+1,pts:s.pts.filter(p=>p[0]>=X0)})).filter(s=>s.pts.length);
+ card.innerHTML="<h2>"+esc(c.title)+" <span class=sub>("+esc(c.unit)+")</span></h2><div class=sub>"+esc(c.note)+"</div>";
+ if(!ser.length){card.innerHTML+="<div class=empty>No data yet.</div>";return card}
+ if(ser.length>1)card.innerHTML+="<div class=legend>"+ser.map(s=>"<span><i style='background:var(--s"+s.ci+")'></i>"+esc(s.name)+"</span>").join("")+"</div>";
+ const W=520,H=200,L=40,Rr=10,Tp=8,B=22,x0=X0,x1=D.now,span=x1-x0;
+ let vals=ser.flatMap(s=>s.pts.map(p=>p[1]));if(c.band){c.band.forEach(v=>{if(v!=null)vals.push(v)})}
+ let lo=Math.min(...vals),hi=Math.max(...vals);if(c.bars)lo=0;if(c.id==="loss")hi=Math.max(hi,10);if(c.bars&&hi===0)hi=1;
+ const ticks=nice(lo,hi,4);lo=ticks[0];hi=ticks[ticks.length-1];
+ const X=t=>L+(t-x0)/(x1-x0)*(W-L-Rr),Y=v=>Tp+(1-(v-lo)/(hi-lo))*(H-Tp-B);
+ let g="<svg viewBox='0 0 "+W+" "+H+"' role=img aria-label='"+esc(c.title)+"'>";
+ g+="<g class=axis>";ticks.forEach(v=>{g+="<line class=gl x1="+L+" x2="+(W-Rr)+" y1="+Y(v)+" y2="+Y(v)+" /><text x="+(L-6)+" y="+(Y(v)+4)+" text-anchor=end>"+v+"</text>"});
+ const nx=4;for(let i=0;i<=nx;i++){const t=x0+(x1-x0)*i/nx;g+="<text x="+X(t)+" y="+(H-4)+" text-anchor="+(i===0?"start":i===nx?"end":"middle")+">"+esc(fmtT(t,span))+"</text>"}g+="</g>";
+ if(c.band){const a=c.band[0]!=null?Y(Math.max(lo,Math.min(hi,c.band[0]))):Tp,b=c.band[1]!=null?Y(Math.max(lo,Math.min(hi,c.band[1]))):Tp;
+  g+="<rect x="+L+" width="+(W-L-Rr)+" y="+Math.min(a,b)+" height="+Math.abs(a-b)+" fill='var(--band)'/>";
+  c.band.forEach(v=>{if(v!=null&&v>=lo&&v<=hi)g+="<line x1="+L+" x2="+(W-Rr)+" y1="+Y(v)+" y2="+Y(v)+" stroke='var(--band-line)' stroke-dasharray='4 3'/>"})}
+ const MK=(D.maint||[]).filter(m=>(m.end||m.ts)>=x0&&m.ts<=x1);
+ MK.forEach(m=>{if(m.end){const xa=X(Math.max(m.ts,x0)),xb=X(Math.min(m.end,x1));g+="<rect x="+xa.toFixed(1)+" y="+Tp+" width="+Math.max(1,xb-xa).toFixed(1)+" height="+(H-Tp-B)+" fill='var(--text-secondary)' fill-opacity='0.08'/>"}});
+ const grp=[];MK.slice().sort((a,b)=>a.ts-b.ts).forEach(m=>{const x=X(Math.max(m.ts,x0)),l=grp[grp.length-1];if(l&&x-l.x<16){l.ms.push(m)}else grp.push({x:x,ms:[m]})});
+ grp.forEach(G=>{const ns=G.ms.map(m=>m.n),lab=ns.length===1?ns[0]:(ns[ns.length-1]-ns[0]===ns.length-1?ns[0]+"\u2013"+ns[ns.length-1]:ns.join(",")),op=G.ms.every(m=>m.status==="suggested")?0.45:0.9,right=G.x>W-Rr-40;
+  g+="<line x1="+G.x.toFixed(1)+" x2="+G.x.toFixed(1)+" y1="+Tp+" y2="+(H-B)+" stroke='var(--text-secondary)' stroke-opacity='"+op+"' stroke-dasharray='3 3'/><text x="+(right?G.x-3:G.x+3).toFixed(1)+" y="+(Tp+10)+" font-size='10' text-anchor='"+(right?"end":"start")+"' fill='var(--text-secondary)' fill-opacity='"+op+"'>"+lab+"</text>"});
+ const step=rg.bucket||D.interval,gap=step*3;
+ ser.forEach(s=>{const col="var(--s"+s.ci+")";
+  if(c.bars){const bw=Math.max(1,(W-L-Rr)*step/(x1-x0)-1);s.pts.forEach(p=>{if(p[1]>0){const y=Y(p[1]);g+="<rect x="+(X(p[0])).toFixed(1)+" y="+y.toFixed(1)+" width="+bw.toFixed(1)+" height="+(Y(0)-y).toFixed(1)+" rx=1 fill='"+col+"'/>"}})}
+  else{let d="",prev=null;s.pts.forEach(p=>{d+=(prev===null||p[0]-prev>gap?"M":"L")+X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);prev=p[0]});
+   g+="<path d='"+d+"' fill=none stroke='"+col+"' stroke-width=2 stroke-linejoin=round stroke-linecap=round />";
+}});
+ g+="<line class=xh x1=0 x2=0 y1="+Tp+" y2="+(H-B)+" stroke='var(--text-muted)' stroke-dasharray='2 2' style='display:none'/><rect class=hit x="+L+" y="+Tp+" width="+(W-L-Rr)+" height="+(H-Tp-B)+" fill=transparent /></svg>";
+ card.insertAdjacentHTML("beforeend",g+"<div class=tip></div>");
+ const svg=card.querySelector("svg"),tip=card.querySelector(".tip"),xh=card.querySelector(".xh");
+ svg.addEventListener("mousemove",e=>{const r=svg.getBoundingClientRect(),sx=(e.clientX-r.left)*W/r.width;const t=x0+(sx-L)/(W-L-Rr)*(x1-x0);
+  let best=null;ser.forEach(s=>s.pts.forEach(p=>{const d=Math.abs(p[0]-t);if(!best||d<best)best=d}));if(best===null||best>step*2){tip.style.display="none";xh.style.display="none";return}
+  let rows=[],tt=null;ser.forEach(s=>{let q=null;s.pts.forEach(p=>{if(!q||Math.abs(p[0]-t)<Math.abs(q[0]-t))q=p});if(q&&Math.abs(q[0]-t)<=step*2){tt=tt??q[0];rows.push("<div><i style='background:var(--s"+s.ci+")'></i>"+esc(s.name)+": <b>"+q[1]+"</b> "+esc(c.unit==="per interval"?"":c.unit)+"</div>")}});
+  MK.filter(m=>Math.abs(m.ts-t)<=(x1-x0)/60||(m.end&&t>=m.ts&&t<=m.end)).forEach(m=>rows.push("<div class=sub>#"+m.n+" "+esc(m.type)+": "+esc(m.note.length>70?m.note.slice(0,70)+"\u2026":m.note)+"</div>"));
+  xh.setAttribute("x1",X(tt));xh.setAttribute("x2",X(tt));xh.style.display="";
+  tip.innerHTML="<div class=sub>"+fmtFull(tt)+(rg.bucket?" (+"+Math.round(rg.bucket/60)+" min)":"")+"</div>"+rows.join("");tip.style.display="block";
+  const cr=card.getBoundingClientRect();let lx=e.clientX-cr.left+12;if(lx+tip.offsetWidth>cr.width)lx=e.clientX-cr.left-tip.offsetWidth-12;tip.style.left=lx+"px";tip.style.top=(e.clientY-cr.top+12)+"px"});
+ svg.addEventListener("mouseleave",()=>{tip.style.display="none";xh.style.display="none"});
+ return card}
+function count(lo){
+ const t={T3:0,T4:0,DRW:0,uncorr:0,us_max:null,reboots:0,relocks:0,failed:0,loss_polls:0,polls:0,link_err:0,missed:0,missed_flag:false,link_drops:0};
+ (D.evc||[]).forEach(e=>{if(e[0]>=lo&&(e[1]==="T3"||e[1]==="T4"||e[1]==="DRW"))t[e[1]]++});
+ (D.samples||[]).forEach(r=>{if(r[0]<lo)return;t.polls++;t.failed+=r[1];t.reboots+=r[2];t.relocks+=r[3];t.uncorr+=r[4];if(r[5]!=null)t.us_max=t.us_max==null?r[5]:Math.max(t.us_max,r[5]);if((r[6]||0)>0)t.loss_polls++});
+ (D.lk||[]).forEach(r=>{if(r[0]<lo)return;t.link_err+=r[1];t.missed+=r[2];t.link_drops+=r[3];if(r[2]>100)t.missed_flag=true});
+ return t}
+function tiles(rg){const t=count(Math.max(D.now-rg.span,SINCE||0)),u=T.us_power_max,li=D.link_info||{};
+ const items=[["T3 timeouts",t.T3,"upstream ranging failures",t.T3>0],["T4 timeouts",t.T4,"modem lost contact, reset",t.T4>0],["Upstream power warnings",t.DRW,"dynamic range window violations",t.DRW>0],["Uncorrectable codewords",t.uncorr.toLocaleString(),"damaged downstream data",t.uncorr>0],
+  ["Peak upstream power",t.us_max==null?"\u2013":t.us_max+" dBmV","guideline max "+u,t.us_max!=null&&t.us_max>u],["Modem reboots",t.reboots,"uptime reset",t.reboots>0],["Re-registrations",t.relocks,"lost signal, no reboot",t.relocks>0],
+  ["Modem unreachable",t.failed,"of "+t.polls+" samples",t.failed>0],["Samples with packet loss",t.loss_polls,"of "+t.polls+" samples",t.loss_polls>0]];
+ if((D.lk||[]).length)items.push(["Router\u2013modem Ethernet errors",t.link_err,t.link_drops+" link drop"+(t.link_drops===1?"":"s")+" \u00b7 "+(li.dev||"WAN")+(li.speed?" "+li.speed+" Mb/s":""),t.link_err>0||t.link_drops>0]);
+ if((D.lk||[]).length&&t.missed)items.push(["Router NIC missed packets",t.missed.toLocaleString(),t.missed_flag?"over 100 in one sample: router tuning":"receive-buffer overruns",t.missed_flag]);
+ $("#tiles").innerHTML=items.map(i=>"<div class='tile"+(i[3]?" bad":"")+"'><div class=k>"+esc(i[0])+"</div><div class=v>"+esc(i[1])+"</div><div class=n>"+esc(i[2])+"</div></div>").join("")}
+function sinceUI(){const M=(D.maint||[]).slice().reverse();
+ $("#since").innerHTML="<option value='0'>All data</option>"+M.map(m=>"<option value='"+startOfEntry(m)+"'"+(startOfEntry(m)===SINCE?" selected":"")+">after #"+m.n+" "+esc(m.type)+" \u2013 "+esc(m.note.length>48?m.note.slice(0,48)+"\u2026":m.note)+" ("+esc((m.end_time||m.time).slice(5,16))+")</option>").join("");
+ const b=$("#sinceBanner"),m=M.find(x=>startOfEntry(x)===SINCE);
+ if(m){b.style.display="block";b.innerHTML="Showing only data after <b>#"+m.n+" "+esc(m.type)+"</b> ("+esc(m.end_time||m.time)+"): "+esc(m.note)+". Counts, charts and tables start there. <a id=sinceClear>Show all data</a>";$("#sinceClear").onclick=()=>setSince(0)}
+ else{b.style.display="none";b.innerHTML=""}}
+function setSince(v){SINCE=+v||0;ls("mm-since",String(SINCE));sinceUI();render();tables()}
+function render(){const rg=D.ranges[R];$("#rng").innerHTML=Object.keys(D.ranges).map(k=>"<button aria-pressed="+(k===R)+" data-r="+k+">"+k+"</button>").join("");
+ tiles(rg);const g=$("#charts");g.innerHTML="";
+ const mk=(D.maint||[]).filter(m=>(m.end||m.ts)>=Math.max(D.now-rg.span,SINCE||0)).length;$("#mk").textContent=mk?"Dashed lines on the charts mark "+mk+" maintenance log entr"+(mk===1?"y":"ies")+" (numbers match the Maintenance log below). Hover a chart for details.":"";
+ CH.forEach(c=>g.appendChild(chart(c,rg)))}
+$("#rng").addEventListener("click",e=>{const r=e.target.dataset.r;if(r){R=r;try{localStorage.setItem("mm-range",r)}catch(x){}render()}});
+$("#since").addEventListener("change",e=>setSince(e.target.value));
+sinceUI();render();
+const n=v=>v==null?"\u2013":v;
+function tables(){const lo=SINCE||0,DL=D.daylist||[],K=DL.map(()=>({T3:0,T4:0,SYNC:0,PROVISION:0,DRW:0,uncorr:0,us_max:null,reboots:0,relocks:0,failed:0,loss:0,link_err:0,link_drops:0,missed:0,polls:0,any:false}));
+ (D.evc||[]).forEach(e=>{if(e[0]>=lo){K[e[2]][e[1]]++;K[e[2]].any=true}});
+ (D.samples||[]).forEach(r=>{if(r[0]<lo)return;const x=K[r[7]];x.any=true;x.polls++;x.failed+=r[1];x.reboots+=r[2];x.relocks+=r[3];x.uncorr+=r[4];if(r[5]!=null)x.us_max=x.us_max==null?r[5]:Math.max(x.us_max,r[5]);if((r[6]||0)>0)x.loss++});
+ (D.lk||[]).forEach(r=>{if(r[0]<lo)return;const x=K[r[4]];x.any=true;x.link_err+=r[1];x.missed+=r[2];x.link_drops+=r[3]});
+ const rows=DL.map((d,i)=>Object.assign({day:d},K[i])).filter(x=>x.any).reverse().slice(0,30);
+ $("#daysTitle").textContent=lo?"Daily summary (since the selected entry)":"Daily summary (last 30 days)";
+ $("#days").innerHTML=rows.length?"<tr><th>Day</th><th class=num>T3</th><th class=num>T4</th><th class=num>Sync loss</th><th class=num>DHCP/provisioning fail</th><th class=num>Power range (DRW)</th><th class=num>Uncorrectables</th><th class=num>Peak US power</th><th class=num>Reboots</th><th class=num>Re-reg.</th><th class=num>Unreachable</th><th class=num>Loss samples</th><th class=num>Link errors</th><th class=num>Link drops</th><th class=num>NIC missed</th><th class=num>Samples</th></tr>"+
+ rows.map(d=>{const bad=d.T3||d.T4||d.PROVISION||d.link_err||d.link_drops||d.reboots||d.relocks||d.failed||(d.us_max!=null&&d.us_max>T.us_power_max);return"<tr><td"+(bad?" class=flag":"")+">"+(bad?"\u25B2 ":"")+d.day+"</td><td class=num>"+d.T3+"</td><td class=num>"+d.T4+"</td><td class=num>"+d.SYNC+"</td><td class=num>"+d.PROVISION+"</td><td class=num>"+d.DRW+"</td><td class=num>"+d.uncorr.toLocaleString()+"</td><td class=num>"+n(d.us_max)+"</td><td class=num>"+d.reboots+"</td><td class=num>"+d.relocks+"</td><td class=num>"+d.failed+"</td><td class=num>"+d.loss+"</td><td class=num>"+d.link_err+"</td><td class=num>"+d.link_drops+"</td><td class=num>"+d.missed.toLocaleString()+"</td><td class=num>"+d.polls+"</td></tr>"}).join(""):"<tr><td class=empty>No samples in this period yet.</td></tr>";
+ const inc=D.incidents.filter(i=>i.ts>=lo),ev=D.events.filter(e=>e.ts>=lo);
+ $("#inc").innerHTML=inc.length?"<tr><th>Start</th><th>End</th><th class=num>About (min)</th><th>What happened</th></tr>"+inc.map(i=>"<tr><td>"+i.start+"</td><td>"+i.end+"</td><td class=num>"+(i.mins||"\u2013")+"</td><td>"+esc(i.why)+"</td></tr>").join(""):"<tr><td class=empty>No incidents recorded"+(lo?" since the selected entry":"")+".</td></tr>";
+ $("#ev").innerHTML=ev.length?"<tr><th>Time</th><th>Type</th><th>Message</th></tr>"+ev.map(e=>"<tr><td>"+e.time+"</td><td"+((e.type==="T3"||e.type==="T4"||e.type==="PROVISION")?" class=flag":"")+">"+esc(e.type)+"</td><td>"+esc(e.msg)+"</td></tr>").join(""):"<tr><td class=empty>No event log entries"+(lo?" since the selected entry":" collected yet")+".</td></tr>";
+ $("#maint").querySelectorAll("tr[data-s]").forEach(r=>r.classList.toggle("sel",+r.dataset.s===lo))}
+const ba=w=>{if(!w)return"<span class=ba>\u2013</span>";const r=a=>a&&a[0]!=null?a[0]+".."+a[1]:"?";return"<span class=ba>DS "+r(w.ds)+" \u00b7 US "+r(w.us)+" dBmV<br>"+(w.uncorr_day==null?"\u2013":w.uncorr_day.toLocaleString())+" uncorr/day \u00b7 "+w.t3t4+" T3/T4 \u00b7 "+w.drw+" DRW"+(w.hours<23?" ("+w.hours+" h)":"")+"</span>"};
+$("#maint").innerHTML=(D.maint||[]).length?"<tr><th>#</th><th>When</th><th>Type</th><th>What happened</th><th>24 h before</th><th>24 h after</th></tr>"+D.maint.slice().reverse().map(m=>"<tr data-s='"+startOfEntry(m)+"'><td class=num>"+m.n+"</td><td>"+m.time+(m.end_time?" to "+(m.end_time.slice(0,10)===m.time.slice(0,10)?m.end_time.slice(11):m.end_time):"")+"</td><td>"+esc(m.type)+(m.status==="suggested"?" <span class=badge>suggested</span>":"")+"</td><td>"+esc(m.note)+" <a class=sl data-s='"+startOfEntry(m)+"'>show data after this</a></td><td>"+ba(m.before)+"</td><td>"+ba(m.after)+"</td></tr>").join(""):"<tr><td class=empty>No maintenance entries yet.</td></tr>";
+$("#maint").addEventListener("click",e=>{const a=e.target.closest("a.sl");if(a){setSince(a.dataset.s);window.scrollTo({top:0,behavior:"smooth"})}});
+tables();
+$("#files").innerHTML=D.files.length?"<ul>"+D.files.map(f=>"<li><a href='data/"+encodeURIComponent(f.name)+"' download>"+esc(f.name)+"</a> <span class=sub>("+f.kb+" KB)</span></li>").join("")+"</ul>":"<div class=empty>No data files yet.</div>";
+</script></body></html>
+"""
+
+
+# --------------------------------------------------------------------------
+# Modem reboot and maintenance commands
+# --------------------------------------------------------------------------
+
+def reboot_modem(cfg, note="", force=False):
+    st = load_state(cfg)
+    now = time.time()
+    last = st.get("last_reboot_issued", 0)
+    if not force and now - last < 600:
+        raise ModemError("a reboot was issued %d minutes ago; wait 10 minutes or use --force"
+                         % ((now - last) // 60))
+    m = S33(cfg, st)
+    eee, led = cfg.get("modem_eee", "0"), cfg.get("modem_led", "1")
+    try:
+        info = m.call(["GetArrisConfigurationInfo"]).get("GetArrisConfigurationInfoResponse", {})
+        for k, v in info.items():
+            kl = k.lower()
+            if isinstance(v, (str, int)) and "result" not in kl:
+                if "eee" in kl:
+                    eee = str(v)
+                elif "led" in kl:
+                    led = str(v)
+    except ModemError as e:
+        log("could not read current EEE/LED settings (%s); using configured %s/%s" % (e, eee, led))
+    payload = {"Action": "reboot", "SetEEEEnable": eee, "LED_Status": led}
+    issued_note = "Reboot issued from router" + (": " + note if note else "")
+    try:
+        r = m.set("SetArrisConfigurationInfo", payload)
+        res = (r.get("SetArrisConfigurationInfoResponse") or {}).get("SetArrisConfigurationInfoResult", "")
+        if str(res).upper() not in ("OK", "REBOOT", ""):
+            raise ModemError("modem answered %r to the reboot request" % res)
+        outcome = "modem accepted the reboot (%s)" % (res or "no result field")
+    except Unreachable:
+        # The modem can drop the connection as it goes down.
+        outcome = "no reply (modem probably already rebooting)"
+        issued_note += " (no reply; check the uptime reset)"
+    st.pop("uid", None)  # the session dies with the reboot
+    st["last_reboot_issued"] = int(now)
+    save_state(cfg, st)
+    add_maint(cfg, now, "modem-reboot", issued_note, source="router", status="confirmed")
+    return outcome
+
+
+def _opts(args, flags=("--type", "--time", "--end", "--note", "--status")):
+    """Tiny argv parser: returns (positional, {flag: value}, set_of_bool_flags)."""
+    pos, kv, bools, i = [], {}, set(), 0
+    while i < len(args):
+        a = args[i]
+        if a in flags and i + 1 < len(args):
+            kv[a[2:]] = args[i + 1]
+            i += 2
+        elif a.startswith("--"):
+            bools.add(a[2:])
+            i += 1
+        else:
+            pos.append(a)
+            i += 1
+    return pos, kv, bools
+
+
+def maint_cli(cfg, cmd, args):
+    pos, kv, bools = _opts(args)
+    rows = load_maint(cfg)
+    if cmd == "mark":
+        note = kv.get("note") or " ".join(pos)
+        if not note:
+            raise ValueError('usage: modem-monitor mark "note" [--type tech] [--time "YYYY-MM-DD HH:MM"] [--end ...]')
+        end = parse_local_time(kv["end"]) if kv.get("end") else None
+        r = add_maint(cfg, parse_local_time(kv.get("time")), kv.get("type", "other"), note, end_ts=end)
+        print("added #%s %s %s: %s" % (r["id"], r["time"], r["type"], r["note"]))
+    elif cmd == "maint-list":
+        if "json" in bools:
+            print(json.dumps(sorted(rows, key=lambda r: -int(r["ts"]))))
+        else:
+            for r in sorted(rows, key=lambda r: -int(r["ts"])):
+                print("#%-3s %s%s  %-13s %-9s %-9s %s" % (r["id"], r["time"][:16],
+                      (" - " + r["end_time"][11:16]) if r.get("end_time") else "        ",
+                      r["type"], r["source"], r["status"], r["note"]))
+    elif cmd in ("maint-edit", "maint-del", "maint-confirm"):
+        if not pos:
+            raise ValueError("usage: modem-monitor %s ID" % cmd)
+        hit = [r for r in rows if str(r["id"]) == pos[0]]
+        if not hit:
+            raise ValueError("no maintenance entry #%s" % pos[0])
+        r = hit[0]
+        if cmd == "maint-del":
+            rows.remove(r)
+            print("deleted #%s" % r["id"])
+        elif cmd == "maint-confirm":
+            r["status"] = "confirmed"
+            print("confirmed #%s" % r["id"])
+        else:
+            if "type" in kv:
+                if kv["type"] not in MAINT_TYPES:
+                    raise ValueError("type must be one of: " + ", ".join(MAINT_TYPES))
+                r["type"] = kv["type"]
+            if "time" in kv:
+                r["ts"] = parse_local_time(kv["time"])
+                r["time"] = _fmt(r["ts"])
+            if "end" in kv:
+                e = parse_local_time(kv["end"]) if kv["end"] else ""
+                r["end_ts"], r["end_time"] = e, _fmt(e) if e else ""
+            if "note" in kv:
+                r["note"] = " ".join(kv["note"].split())[:500]
+            r["status"] = kv.get("status", "confirmed")  # an edited suggestion counts as reviewed
+            print("updated #%s" % r["id"])
+        save_maint(cfg, rows)
+    elif cmd == "maint-import":
+        if not pos:
+            raise ValueError("usage: modem-monitor maint-import FILE.csv  (columns: time,end_time,type,note[,source])")
+        have = {(r["time"][:16], r["type"], r["note"]) for r in rows}
+        n = skipped = 0
+        with open(pos[0], newline="") as f:
+            for x in csv.DictReader(f):
+                ts = parse_local_time(x["time"])
+                end = parse_local_time(x["end_time"]) if x.get("end_time") else None
+                key = (_fmt(ts)[:16], x["type"], " ".join(x["note"].split()))
+                if key in have:
+                    skipped += 1
+                    continue
+                add_maint(cfg, ts, x["type"], x["note"], source=x.get("source") or "backfill",
+                          status="confirmed", end_ts=end, rows=rows)
+                have.add(key)
+                n += 1
+        save_maint(cfg, rows)
+        print("imported %d entr%s (%d already present)" % (n, "y" if n == 1 else "ies", skipped))
+    if cmd != "maint-list":
+        try:
+            build_report(cfg)
+        except Exception as e:
+            log("report error: %r" % e)
+
+
+# --------------------------------------------------------------------------
+# Export: one zip with all data + diagnostics
+# --------------------------------------------------------------------------
+
+MAC_RE = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
+IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _private_ip(ip):
+    try:
+        a, b = (int(x) for x in ip.split(".")[:2])
+    except ValueError:
+        return True
+    return a in (0, 10, 127) or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31) or (a == 169 and b == 254)
+
+
+def redact(text):
+    text = MAC_RE.sub("xx:xx:xx:xx:xx:xx", text)
+    return IP_RE.sub(lambda m: m.group(0) if _private_ip(m.group(0)) else "x.x.x.x", text)
+
+
+def _run(cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return (r.stdout + r.stderr).rstrip()
+    except (OSError, subprocess.SubprocessError) as e:
+        return "(unavailable: %s)" % e
+
+
+def system_report(cfg):
+    dev = wan_device(cfg) or "?"
+    st = load_state(cfg)
+    safe_state = {k: v for k, v in st.items() if k not in ("uid", "private_key", "seen_events")}
+    safe_state["seen_events_count"] = len(st.get("seen_events", []))
+    uci = "\n".join(re.sub(r"(\.password=).*", r"\1'(removed)'", l)
+                    for l in _run(["uci", "-q", "show", "modem_monitor"]).splitlines())
+    logs = _run(["logread", "-e", "modem-monitor"]).splitlines()[-300:]
+    nics = sorted(n for n in os.listdir("/sys/class/net") if n.startswith("eth")) if os.path.isdir("/sys/class/net") else []
+    # IRQ affinity for each NIC's interrupts
+    irq = []
+    for line in _read("/proc/interrupts").splitlines():
+        m = re.match(r"\s*(\d+):", line)
+        if m and any(re.search(r"\b%s\b" % re.escape(n), line) for n in nics):
+            n = m.group(1)
+            irq.append("IRQ %s  smp_affinity=%s  list=%s  | %s" % (
+                n, _read("/proc/irq/%s/smp_affinity" % n), _read("/proc/irq/%s/smp_affinity_list" % n),
+                " ".join(line.split()[-3:])))
+    rps = ["%s: %s" % (q, _read(q)) for n in nics
+           for q in sorted(glob.glob("/sys/class/net/%s/queues/rx-*/rps_cpus" % n))]
+    sysctl = ["%s = %s" % (k, _read("/proc/sys/net/core/" + k))
+              for k in ("netdev_budget", "netdev_budget_usecs", "netdev_max_backlog", "rps_sock_flow_entries")]
+    missed = []
+    for n in nics:
+        for line in _run(["ethtool", "-S", n]).splitlines():
+            if "missed" in line or "drop" in line:
+                missed.append("%s %s" % (n, line.strip()))
+    # Modem access + DDNS conflict check (an alias on the WAN device can be
+    # picked up by ddns-scripts using ip_source=interface)
+    mode = cfg.get("modem_route") or ("off" if cfg.get("add_modem_route") == "0" else "host")
+    ddns = _run(["uci", "-q", "show", "ddns"])
+    warn = []
+    secs = {}
+    for line in ddns.splitlines():
+        m = re.match(r"ddns\.([^.=]+)\.(\w+)='?([^']*)'?$", line)
+        if m:
+            secs.setdefault(m.group(1), {})[m.group(2)] = m.group(3)
+    alias_present = cfg.get("modem_alias_ip", "192.168.100.10") in _run(["ip", "-4", "addr", "show", "dev", dev])
+    for name, o in secs.items():
+        if o.get("ip_source") == "interface" and o.get("ip_interface") == dev and o.get("enabled", "1") != "0":
+            warn.append("WARNING: ddns section '%s' uses ip_source=interface on %s%s" % (
+                name, dev, "; the modem alias address is present there and can be picked up as the WAN IP"
+                if alias_present else " (no modem alias present now, so no conflict)"))
+    access = "\n".join(["mode: %s" % mode, "ip route get %s: %s" % (cfg["host"], _run(["ip", "route", "get", cfg["host"]])),
+                        _run(["ip", "-4", "addr", "show", "dev", dev])] + (warn or ["DDNS check: no conflict found"]))
+    mi = st.get("modem_info", {})
+    parts = [
+        ("Generated", time.strftime("%Y-%m-%d %H:%M:%S %Z")),
+        ("modem-monitor version", VERSION),
+        ("ISP / report note", "%s / %s" % (cfg.get("isp_name") or "(not set)", cfg.get("report_note") or "(not set)")),
+        ("OpenWrt release", _read("/etc/openwrt_release")),
+        ("Uptime", _run(["uptime"])),
+        ("Settings (uci, password removed)", uci),
+        ("Monitor state (session keys removed)", json.dumps(safe_state, indent=1, sort_keys=True)),
+        ("Modem", "model %s, firmware %s, hardware %s (read %s)" % (
+            mi.get("model", "?"), mi.get("firmware", "?"), mi.get("hardware", "?"), _fmt(mi["ts"]) if mi.get("ts") else "never")),
+        ("WAN device", dev),
+        ("Modem access and DDNS check", access),
+        ("ip -s link show " + dev, _run(["ip", "-s", "link", "show", "dev", dev])),
+        ("ethtool " + dev, _run(["ethtool", dev])),
+        ("ethtool -S " + dev, _run(["ethtool", "-S", dev])),
+        ("NIC IRQ affinity (/proc/irq/*/smp_affinity)", "\n".join(irq) or "(none found)"),
+        ("RPS (rps_cpus)", "\n".join(rps) or "(none found)"),
+        ("net.core sysctls", "\n".join(sysctl)),
+        ("NIC missed/drop counters (ethtool -S, all eth*)", "\n".join(missed) or "(none)"),
+        ("Data directory", _run(["ls", "-l", cfg["data_dir"]])),
+        ("Disk space", _run(["df", "-h", cfg["data_dir"]])),
+        ("logread -e modem-monitor (last 300 lines)", "\n".join(logs)),
+    ]
+    return "".join("==== %s ====\n%s\n\n" % (h, b) for h, b in parts)
+
+
+def export(cfg, full=False):
+    web = cfg["web_dir"]
+    os.makedirs(web, exist_ok=True)
+    for old in glob.glob(os.path.join(web, "modem-monitor-export-*.zip")):
+        os.remove(old)
+    name = "modem-monitor-export-%s.zip" % time.strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(web, name)
+    tmp = path + ".tmp"
+    try:
+        import zlib  # noqa: F401
+        comp = zipfile.ZIP_DEFLATED
+    except ImportError:
+        comp = zipfile.ZIP_STORED
+    clean = (lambda t: t) if full else redact
+    files = sorted(glob.glob(os.path.join(cfg["data_dir"], "*.csv")))
+    with zipfile.ZipFile(tmp, "w", comp) as z:
+        for p in files:
+            n = os.path.basename(p)
+            if n == "events.csv":
+                with open(p, encoding="utf-8", errors="replace") as f:
+                    z.writestr("data/" + n, clean(f.read()))
+            else:
+                z.write(p, "data/" + n)
+        rep = os.path.join(web, "index.html")
+        if os.path.exists(rep):
+            with open(rep, encoding="utf-8", errors="replace") as f:
+                z.writestr("report.html", clean(f.read()))
+        lat = os.path.join(web, "latest.json")
+        if os.path.exists(lat):
+            z.write(lat, "latest.json")
+        z.writestr("system.txt", clean(system_report(cfg)))
+        z.writestr("README.txt",
+                   "Cable modem monitor export (modem-monitor %s), %s\n\n"
+                   "data/summary-YYYY-MM.csv   one row per sample: levels, error counts, ping\n"
+                   "data/channels-YYYY-MM.csv  per-channel power/SNR/error counters\n"
+                   "data/events.csv            modem event log entries\n"
+                   "data/link-YYYY-MM.csv      router-to-modem Ethernet counters\n"
+                   "report.html                the signal report (open in a browser)\n"
+                   "system.txt                 versions, settings, NIC counters, monitor log\n\n"
+                   "%s\n" % (VERSION, time.strftime("%Y-%m-%d %H:%M:%S"),
+                             "Addresses are NOT masked (--full)." if full else
+                             "MAC addresses and public IP addresses are masked; the files on the router are unchanged."))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return path
+
+
+# --------------------------------------------------------------------------
+# Test command (used by the LuCI "Test connection" button)
+# --------------------------------------------------------------------------
+
+def test(cfg, raw=False):
+    st = load_state(cfg) if os.path.isdir(cfg["data_dir"]) else {}
+    st.pop("login_backoff_until", None)  # manual test always tries
+    st.pop("uid", None)
+    m = S33(cfg, st)
+    print("Modem: %s  user: %s" % (cfg["host"], cfg["username"]))
+    try:
+        m.login()
+    except ModemError as e:
+        print("FAILED: %s" % e)
+        if os.path.isdir(cfg["data_dir"]):
+            save_state(cfg, st)
+        return 1
+    print("Login OK (%s, HMAC-%s)" % (st["scheme"].upper(), st["algo"].upper()))
+    resp = m.call(["GetCustomerStatusDownstreamChannelInfo", "GetCustomerStatusUpstreamChannelInfo",
+                   "GetCustomerStatusConnectionInfo", "GetCustomerStatusSoftware"])
+    sw = resp.get("GetCustomerStatusSoftwareResponse", {})
+    for k in ("StatusSoftwareModelName", "StatusSoftwareSfVer", "StatusSoftwareHdVer"):
+        if sw.get(k):
+            print("%s: %s" % (k.replace("StatusSoftware", ""), sw[k]))
+    ds = parse_downstream(resp.get("GetCustomerStatusDownstreamChannelInfoResponse", {}).get("CustomerConnDownstreamChannel"))
+    us = parse_upstream(resp.get("GetCustomerStatusUpstreamChannelInfoResponse", {}).get("CustomerConnUpstreamChannel"))
+    up = parse_uptime(resp.get("GetCustomerStatusConnectionInfoResponse"))
+    print("Uptime: %s" % (str(timedelta(seconds=up)) if up is not None else "unknown"))
+    print("\nDownstream: %d channels" % len(ds))
+    for c in ds:
+        print("  ch %-3s %-8s %-9s %8s MHz  power %6s dBmV  SNR %5s dB  corr %s  uncorr %s"
+              % (c["ch"], c["lock"], c["mod"], c["freq"], c["power"], c["snr"], c["corr"], c["uncorr"]))
+    print("\nUpstream: %d channels" % len(us))
+    for c in us:
+        print("  ch %-3s %-8s %-9s %8s MHz  power %6s dBmV" % (c["ch"], c["lock"], c["mod"], c["freq"], c["power"]))
+    try:
+        lr = m.call(["GetCustomerStatusLog"]).get("GetCustomerStatusLogResponse", {})
+        evs = parse_events(lr)
+        print("\nEvent log: %d entries (last 8 shown)" % len(evs))
+        for e in evs[-8:]:
+            print("  %s %s [%s] %s" % (e["date"], e["time"], classify(e["msg"]), e["msg"]))
+    except ModemError as e:
+        print("\nEvent log: unavailable (%s)" % e)
+        lr = {}
+    if raw:
+        print("\n--- raw ---")
+        print(json.dumps(resp, indent=1)[:20000])
+        print(json.dumps(lr, indent=1)[:20000])
+    if os.path.isdir(cfg["data_dir"]):
+        save_state(cfg, st)
+    return 0
+
+
+# --------------------------------------------------------------------------
+
+def daemon(cfg):
+    interval = max(60, int(fnum(cfg, "interval")))
+    rep_every = max(60, int(fnum(cfg, "report_interval")))
+    log("started v%s, polling %s every %ds" % (VERSION, cfg["host"], interval))
+    last_rep = 0
+    last_prune = 0
+    while True:
+        t0 = time.time()
+        try:
+            poll(cfg)
+        except Exception as e:  # never die; procd would respawn anyway
+            log("poll error: %r" % e)
+        if time.time() - last_rep >= rep_every:
+            try:
+                build_report(cfg)
+            except Exception as e:
+                log("report error: %r" % e)
+            last_rep = time.time()
+        if time.time() - last_prune >= 86400:
+            try:
+                prune(cfg)
+            except OSError:
+                pass
+            last_prune = time.time()
+        time.sleep(max(5, interval - (time.time() - t0)))
+
+
+def main():
+    # LuCI buttons run us via rpcd, which uses umask 077. uhttpd refuses to
+    # serve files that aren't world-readable, so force sane permissions.
+    os.umask(0o022)
+    args = sys.argv[1:]
+    cmd = args[0] if args else "help"
+    cfg = load_config()
+    if cmd in ("poll", "daemon", "report"):
+        os.makedirs(cfg["data_dir"], exist_ok=True)
+        os.makedirs(cfg["web_dir"], exist_ok=True)
+    if cmd == "daemon":
+        daemon(cfg)
+    elif cmd == "poll":
+        r = poll(cfg)
+        print("ok" if r["ok"] else "modem error: %s" % r["error"])
+        build_report(cfg)
+    elif cmd == "report":
+        print(build_report(cfg))
+    elif cmd in ("mark", "maint-list", "maint-edit", "maint-del", "maint-confirm", "maint-import"):
+        os.makedirs(cfg["data_dir"], exist_ok=True)
+        os.makedirs(cfg["web_dir"], exist_ok=True)
+        try:
+            maint_cli(cfg, cmd, args[1:])
+        except (ValueError, OSError, KeyError) as e:
+            print("error: %s" % e)
+            sys.exit(2)
+    elif cmd == "reboot-modem":
+        pos, kv, bools = _opts(args[1:])
+        try:
+            print(reboot_modem(cfg, kv.get("note") or " ".join(pos), "force" in bools))
+            build_report(cfg)
+        except ModemError as e:
+            print("error: %s" % e)
+            sys.exit(1)
+    elif cmd == "export":
+        p = export(cfg, "--full" in args)
+        print("%s (%d KB)" % (os.path.basename(p), round(os.path.getsize(p) / 1024)))
+        print(p)
+    elif cmd == "test":
+        sys.exit(test(cfg, "--raw" in args))
+    elif cmd in ("version", "--version"):
+        print(VERSION)
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main()

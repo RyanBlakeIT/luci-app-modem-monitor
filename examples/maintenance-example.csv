@@ -1,0 +1,5 @@
+time,end_time,type,note,source
+2026-11-19 14:00,2026-11-19 14:20,isp-call,"Called the ISP about intermittent drops; ticket opened",manual
+2026-11-21 10:00,2026-11-21 10:45,tech,"Technician replaced the drop connector and outside splitter",manual
+2026-11-23 09:30,,router-change,"Raised SQM download limit",manual
+2026-11-24 18:00,,modem-reboot,"Planned modem reboot for a fresh baseline",manual

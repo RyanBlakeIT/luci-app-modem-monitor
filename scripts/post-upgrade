@@ -1,0 +1,12 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+rm -f /tmp/luci-indexcache* 2>/dev/null
+rm -rf /tmp/luci-modulecache 2>/dev/null
+/etc/init.d/rpcd reload 2>/dev/null
+# choose a storage location on first install (also run by OpenWrt's default_postinst)
+if [ -f /etc/uci-defaults/90-modem-monitor-storage ]; then
+	( . /etc/uci-defaults/90-modem-monitor-storage ) && rm -f /etc/uci-defaults/90-modem-monitor-storage
+fi
+/etc/init.d/modem-monitor enable
+/etc/init.d/modem-monitor restart
+exit 0

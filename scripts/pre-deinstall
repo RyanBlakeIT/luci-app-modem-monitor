@@ -1,0 +1,5 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+/etc/init.d/modem-monitor stop 2>/dev/null
+/etc/init.d/modem-monitor disable 2>/dev/null
+exit 0

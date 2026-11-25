@@ -1,0 +1,45 @@
+#!/bin/sh
+# luci-app-modem-monitor: pick where to keep history on first install.
+# Prefers a real (non-RAM) writable mount with room (/data, /mnt/*, /srv/*, /opt/*),
+# otherwise /root; sets retention from the free space. Never touches a location
+# the user chose or one that already holds data. Safe to run more than once.
+
+[ "$(uci -q get modem_monitor.main.storage_auto)" = "1" ] && exit 0
+
+done_auto() { uci -q set modem_monitor.main.storage_auto='1'; uci -q commit modem_monitor; }
+
+DEFAULT=/root/modem-monitor
+cur="$(uci -q get modem_monitor.main.data_dir)"
+if [ -n "$cur" ] && [ "$cur" != "$DEFAULT" ]; then done_auto; exit 0; fi
+if ls "${cur:-$DEFAULT}"/*.csv >/dev/null 2>&1; then done_auto; exit 0; fi
+
+free_kb() { df -k "$1" 2>/dev/null | awk 'NR==2 {print $4}'; }
+persistent_rw() {
+	fs="$(awk -v m="$1" '$2 == m {print $3}' ${MM_MOUNTS:-/proc/mounts} | tail -n 1)"
+	case "$fs" in ""|tmpfs|ramfs|devtmpfs|squashfs|proc|sysfs|overlay) return 1 ;; esac
+	touch "$1/.mm-write-test" 2>/dev/null && rm -f "$1/.mm-write-test"
+}
+
+best=""; best_free=0
+for m in /data $(awk '$2 ~ "^/(mnt|srv|opt)/" {print $2}' ${MM_MOUNTS:-/proc/mounts}); do
+	persistent_rw "$m" || continue
+	f="$(free_kb "$m")"
+	[ -n "$f" ] && [ "$f" -gt "$best_free" ] && { best="$m"; best_free="$f"; }
+done
+
+if [ -n "$best" ] && [ "$best_free" -ge 524288 ]; then
+	dir="$best/modem-monitor"; free="$best_free"
+else
+	dir="$DEFAULT"; free="$(free_kb /root)"; free="${free:-0}"
+fi
+
+if [ "$free" -ge 1048576 ]; then keep=400
+elif [ "$free" -ge 262144 ]; then keep=180
+else keep=90
+fi
+
+uci -q set modem_monitor.main.data_dir="$dir"
+uci -q set modem_monitor.main.retention_days="$keep"
+done_auto
+logger -t modem-monitor "storage: $dir ($((free / 1024)) MB free, $(uname -m)); keeping $keep days of history"
+exit 0
