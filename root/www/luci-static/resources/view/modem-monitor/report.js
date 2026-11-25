@@ -124,7 +124,7 @@ return view.extend({
 				E('label', {}, [ _('From') + ' ', from ]), E('label', {}, [ _('To') + ' ', to ])
 			]),
 			E('label', { 'style': 'display:block;margin-top:10px' }, [ excl, ' ',
-				_('Leave out disruption caused by planned work (tech visits, reboots I started, router changes). The summary lists what was left out.') ]),
+				_('Leave out disruption caused by planned work (tech visits, reboots I started, router and wiring changes). The summary lists what was left out.') ]),
 			E('div', { 'class': 'right', 'style': 'margin-top:12px' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Cancel')), ' ',
 				E('button', { 'class': 'btn cbi-button-positive', 'click': function() {

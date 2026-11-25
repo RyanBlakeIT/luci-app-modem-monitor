@@ -13,7 +13,7 @@ Commands:
   modem-monitor reboot-modem [--note "why"]   reboot the modem and log it
   modem-monitor mark "note" [--type T] [--time "YYYY-MM-DD HH:MM"] [--end ...]
                          add a maintenance-log entry (types: tech, modem-reboot,
-                         router-change, isp-call, outage, other)
+                         router-change, wiring, isp-call, outage, other)
   modem-monitor maint-list [--json] | maint-edit ID [--type --time --end --note]
   modem-monitor maint-del ID | maint-confirm ID | maint-import FILE.csv
   modem-monitor update-check [--json] [--cached]   is a newer release on GitHub?
@@ -51,7 +51,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1301,7 +1301,7 @@ def prune(cfg):
 # --------------------------------------------------------------------------
 
 MAINT_COLS = ["id", "ts", "time", "end_ts", "end_time", "type", "note", "source", "status"]
-MAINT_TYPES = ("tech", "modem-reboot", "router-change", "isp-call", "outage", "other")
+MAINT_TYPES = ("tech", "modem-reboot", "router-change", "wiring", "isp-call", "outage", "other")
 
 
 def maint_path(cfg):
@@ -3200,12 +3200,12 @@ def _day_ts(s):
     return int(time.mktime(time.strptime(s, "%Y-%m-%d")))
 
 
-WORK_TYPES = ("tech", "modem-reboot", "router-change")
+WORK_TYPES = ("tech", "modem-reboot", "router-change", "wiring")
 
 
 def work_windows(maint, summ, interval):
     """Time taken up by planned work, from the confirmed tech / modem-reboot /
-    router-change entries: from the start until the line has settled (first two
+    router-change / wiring entries: from the start until the line has settled (first two
     clean samples after the work ends, looked for up to an hour; otherwise 15
     minutes after it ends, so lasting trouble is still counted)."""
     ok = lambda r: (r.get("ok") == "1" and not r["_reb"] and not r["_rel"] and (fv(r, "ping_loss") or 0) == 0)
@@ -3448,7 +3448,7 @@ const many=D.days.length>62,DR=many?D.days.filter(r=>r.bad):D.days;
 h+=(many?"<div class=muted>Only days with problems are listed ("+DR.length+").</div>":"")+"<table><tr><th>Day</th><th class=n>T3</th><th class=n>T4</th><th class=n>Re-reg. events</th><th class=n>Uncorrectables</th><th class=n>Peak US dBmV</th><th class=n>Reboots</th><th class=n>Re-reg.</th><th class=n>Unreachable samples</th><th class=n>Loss samples</th><th>Pattern</th></tr>"+
  DR.map(r=>"<tr"+(r.bad?" class=bad":"")+"><td>"+r.day+"</td><td class=n>"+r.T3+"</td><td class=n>"+r.T4+"</td><td class=n>"+r.REG+"</td><td class=n>"+f(r.uncorr)+"</td><td class=n>"+f(r.us_max)+"</td><td class=n>"+r.reboots+"</td><td class=n>"+r.relocks+"</td><td class=n>"+r.down+"</td><td class=n>"+r.loss+"</td><td>"+(r.ingress?(r.ingress.kind==="narrow"?"ingress? "+r.ingress.share+"% on "+r.ingress.fmin+"–"+r.ingress.fmax+" MHz":"spread across band"):(r.polls?"":(r.logged?"modem log only":"no data")))+"</td></tr>").join("")+"</table>";
 if(D.maint.length)h+="<h2>Repairs, calls and changes</h2><table><tr><th>When</th><th>Type</th><th>What happened</th></tr>"+D.maint.map(m=>"<tr><td>"+esc(m.time)+(m.end?" to "+esc(m.end.slice(0,10)===m.time.slice(0,10)?m.end.slice(11):m.end):"")+"</td><td style='white-space:nowrap'>"+esc(m.type)+(m.status==="suggested"?" (auto-detected)":"")+"</td><td>"+esc(m.note)+"</td></tr>").join("")+"</table>";
-if(D.excluded.length){h+="<h2>Left out of the counts</h2><p class=muted>Disruption caused by planned work (technician visits, reboots I started, changes to my own router) is not counted above, from the start of the work until the line settled. What those windows contained:</p><table><tr><th>Window</th><th>Work</th><th class=n>Samples</th><th class=n>T3/T4</th><th class=n>Uncorrectables</th><th class=n>Unreachable</th><th class=n>Reboots / re-reg.</th></tr>"+D.excluded.map(w=>"<tr><td>"+w.start+" to "+(w.end.slice(0,10)===w.start.slice(0,10)?w.end.slice(11):w.end)+"</td><td>"+esc(w.type)+": "+esc(w.note.length>80?w.note.slice(0,80)+"\u2026":w.note)+"</td><td class=n>"+w.samples+"</td><td class=n>"+w.t34+"</td><td class=n>"+f(w.uncorr)+"</td><td class=n>"+w.down+"</td><td class=n>"+w.reb+" / "+w.rel+"</td></tr>").join("")+"</table>"}
+if(D.excluded.length){h+="<h2>Left out of the counts</h2><p class=muted>Disruption caused by planned work (technician visits, reboots I started, changes to my own router or wiring) is not counted above, from the start of the work until the line settled. What those windows contained:</p><table><tr><th>Window</th><th>Work</th><th class=n>Samples</th><th class=n>T3/T4</th><th class=n>Uncorrectables</th><th class=n>Unreachable</th><th class=n>Reboots / re-reg.</th></tr>"+D.excluded.map(w=>"<tr><td>"+w.start+" to "+(w.end.slice(0,10)===w.start.slice(0,10)?w.end.slice(11):w.end)+"</td><td>"+esc(w.type)+": "+esc(w.note.length>80?w.note.slice(0,80)+"\u2026":w.note)+"</td><td class=n>"+w.samples+"</td><td class=n>"+w.t34+"</td><td class=n>"+f(w.uncorr)+"</td><td class=n>"+w.down+"</td><td class=n>"+w.reb+" / "+w.rel+"</td></tr>").join("")+"</table>"}
 else if(!D.exclude_work)h+="<p class=muted>All recorded data is counted, including any disruption caused by planned work.</p>";
 if(D.outages.length)h+="<h2>Outages</h2><table><tr><th>Start</th><th class=n>About (min)</th><th>Detail</th></tr>"+D.outages.map(o=>"<tr><td>"+o.start+"</td><td class=n>"+o.mins+"</td><td>"+esc(o.why)+"</td></tr>").join("")+"</table>";
 if(D.t34.length)h+="<h2>Timeouts logged by the modem"+(T.T3+T.T4>D.t34.length?" (latest "+D.t34.length+")":"")+"</h2><table><tr><th>Time</th><th>Type</th><th>Modem log message</th></tr>"+D.t34.map(e=>"<tr><td>"+e.time+"</td><td>"+e.type+"</td><td>"+esc(e.msg)+"</td></tr>").join("")+"</table>";

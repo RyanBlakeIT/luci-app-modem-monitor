@@ -10,6 +10,7 @@ var TYPES = [
 	[ 'outage', _('Outage') ],
 	[ 'modem-reboot', _('Modem reboot') ],
 	[ 'router-change', _('Router change') ],
+	[ 'wiring', _('Wiring / attenuation change') ],
 	[ 'other', _('Other') ]
 ];
 
@@ -99,7 +100,7 @@ return view.extend({
 		var ended = E('input', { 'type': 'datetime-local', 'class': 'cbi-input-text', 'value': m.end_ts ? dtValue(+m.end_ts) : '' });
 		var type = typeSelect(m.type);
 		var note = E('textarea', { 'class': 'cbi-input-textarea', 'rows': 4, 'style': 'width:100%' }, m.note || '');
-		ui.showModal(_('Edit entry #%s').format(m.id), [
+		ui.showModal(_('Edit entry from %s').format(m.time.slice(0, 16)), [
 			field(_('When'), when),
 			field(_('Ended'), ended, _('Leave empty for a single point in time.')),
 			field(_('Type'), type),
@@ -129,11 +130,14 @@ return view.extend({
 		if (!entries.length)
 			return E('div', { 'class': 'cbi-section' }, [ E('h3', {}, _('Entries')), E('p', { 'style': 'opacity:.7' }, _('No entries yet.')) ]);
 
+		/* number entries by time, the same way the report numbers its chart markers */
+		var num = {};
+		entries.slice().sort(function(a, b) { return (+a.ts) - (+b.ts); }).forEach(function(m, i) { num[m.id] = i + 1; });
 		var rows = entries.map(function(m) {
 			var sug = m.status === 'suggested';
 			var end = m.end_time ? ' – ' + (m.end_time.slice(0, 10) === m.time.slice(0, 10) ? m.end_time.slice(11, 16) : m.end_time.slice(0, 16)) : '';
 			return E('tr', { 'class': 'tr' + (sug ? ' mm-sug' : '') }, [
-				E('td', { 'class': 'td', 'style': 'white-space:nowrap' }, '#' + m.id),
+				E('td', { 'class': 'td', 'style': 'white-space:nowrap', 'title': _('Stored ID %s (used by the modem-monitor maint-* commands)').format(m.id) }, '#' + num[m.id]),
 				E('td', { 'class': 'td', 'style': 'white-space:nowrap' }, m.time.slice(0, 16) + end),
 				E('td', { 'class': 'td', 'style': 'white-space:nowrap' }, [ typeLabel(m.type),
 					E('div', { 'style': 'font-size:11px;opacity:.7' }, sug ? _('suggested automatically') : m.source) ]),
@@ -143,7 +147,7 @@ return view.extend({
 						'click': ui.createHandlerFn(self, 'act', [ 'maint-confirm', String(m.id) ]) }, _('Confirm')) : '', ' ',
 					E('button', { 'class': 'btn cbi-button-edit', 'click': ui.createHandlerFn(self, 'editEntry', m) }, _('Edit')), ' ',
 					E('button', { 'class': 'btn cbi-button-remove',
-						'click': ui.createHandlerFn(self, 'act', [ 'maint-del', String(m.id) ], _('Delete entry #%s?').format(m.id)) }, _('Delete'))
+						'click': ui.createHandlerFn(self, 'act', [ 'maint-del', String(m.id) ], _('Delete entry #%s (%s)?').format(num[m.id], m.time.slice(0, 16))) }, _('Delete'))
 				])
 			]);
 		});

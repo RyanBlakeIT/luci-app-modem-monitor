@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.1
+- New maintenance type **Wiring / attenuation change** (`wiring`) for splitters, pads, cables and connectors. Like tech visits and planned reboots, these count as planned work, so the complaint summary leaves out the disruption they cause.
+- The Maintenance Log tab numbers entries by time, matching the numbers on the report's chart markers. A back-dated entry no longer shows up out of sequence. The stored ID that the `maint-*` commands use is shown on hover.
+
 ## 1.5.0
 Each of these can be turned on or off under Settings.
 - **1-second latency probe** (Settings → Line quality; off by default): one small ping per second to the ISP gateway, or an address you choose, run inside the monitor. Each sample records jitter, p95 and worst latency, the share of pings lost, **short dropouts** (2+ seconds without a reply, adjustable) and the longest one. It shows up in:
