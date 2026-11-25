@@ -22,11 +22,54 @@ return view.extend({
 		});
 	},
 
-	render: function() {
-		var m, s, o;
+	load: function() {
+		return Promise.all([
+			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'version' ]).then(function(r) { return (r.stdout || '').trim(); }), ''),
+			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'update-check', '--json', '--cached' ]).then(function(r) {
+				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
+			}), null)
+		]);
+	},
+
+	render: function(data) {
+		var m, s, o, ver = data[0], upd = data[1];
 
 		m = new form.Map('modem_monitor', _('Cable Modem Monitor'),
 			_('Polls the cable modem (tested with the Arris SURFboard S33) for signal levels, error counters and its event log, and pings the internet, every few minutes. Save & Apply, then use "Test connection".'));
+
+		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Updates'),
+			_('Checks the GitHub repository for a newer release every 6 hours. When one exists, the Signal Report page offers to install it; nothing is installed without your click.'));
+
+		o = s.option(form.DummyValue, '_version', _('Version'));
+		o.rawhtml = true;
+		o.cfgvalue = function() {
+			var cur = (upd && upd.current) || ver || '?';
+			var html = '<strong>' + cur + '</strong>';
+			if (upd && upd.newer)
+				html += ' &middot; <span style="color:#c48a00">' + _('version %s is available').format(upd.latest) + '</span> &middot; <a href="' + L.url('admin/status/modem-monitor/report') + '">' + _('install it from the Signal Report page') + '</a>';
+			else if (upd && upd.latest && !upd.error)
+				html += ' &middot; ' + _('up to date');
+			if (upd && upd.checked)
+				html += ' <span style="opacity:.7">(' + _('last checked %s').format(new Date(upd.checked * 1000).toLocaleString()) + ')</span>';
+			return html;
+		};
+
+		o = s.option(form.Flag, 'update_check', _('Check for updates automatically'));
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'update_repo', _('GitHub repository'), _('owner/name; change this if you use a fork.'));
+		o.placeholder = 'RyanBlakeIT/luci-app-modem-monitor';
+
+		o = s.option(form.Button, '_check', _('Check now'));
+		o.inputtitle = _('Check now');
+		o.inputstyle = 'action';
+		o.onclick = function() {
+			return fs.exec('/usr/bin/modem-monitor', [ 'update-check' ]).then(function(res) {
+				if (res.code === 0) return location.reload();
+				ui.addNotification(null, E('p', {}, ((res.stdout || '') + (res.stderr || '')).trim() || _('No answer.')), 'warning');
+			});
+		};
 
 		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Modem'));
 
@@ -177,26 +220,6 @@ return view.extend({
 			return fs.exec('/usr/bin/modem-monitor', [ 'alert-test' ]).then(function(res) {
 				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' },
 					(((res.stdout || '') + (res.stderr || '')).trim() || _('No answer.')) + '\n\n' + _('Uses the saved settings, so Save & Apply first.')),
-					res.code === 0 ? 'info' : 'warning');
-			});
-		};
-
-		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Updates'),
-			_('Checks the GitHub repository for a newer release once a day. When one exists, the Signal Report page offers to install it; nothing is installed without your click.'));
-
-		o = s.option(form.Flag, 'update_check', _('Check for updates'));
-		o.default = '1';
-		o.rmempty = false;
-
-		o = s.option(form.Value, 'update_repo', _('GitHub repository'), _('owner/name; change this if you use a fork.'));
-		o.placeholder = 'RyanBlakeIT/luci-app-modem-monitor';
-
-		o = s.option(form.Button, '_check', _('Check now'));
-		o.inputtitle = _('Check now');
-		o.inputstyle = 'action';
-		o.onclick = function() {
-			return fs.exec('/usr/bin/modem-monitor', [ 'update-check' ]).then(function(res) {
-				ui.addNotification(null, E('p', {}, ((res.stdout || '') + (res.stderr || '')).trim() || _('No answer.')),
 					res.code === 0 ? 'info' : 'warning');
 			});
 		};

@@ -47,7 +47,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -2421,7 +2421,7 @@ def update_check(cfg, force=False, cached=False):
         with open(UPDATE_CACHE) as f:
             c = json.load(f)
         if c.get("current") == VERSION and c.get("repo") == cfg.get("update_repo") and not force:
-            if (cached and now - c.get("checked", 0) < 86400) or now - c.get("checked", 0) < 6 * 3600:
+            if now - c.get("checked", 0) < 6 * 3600:
                 return c
     except (OSError, ValueError):
         pass
@@ -2728,7 +2728,7 @@ def daemon(cfg):
     log("started v%s, polling %s every %ds" % (VERSION, cfg["host"], interval))
     last_rep = 0
     last_prune = 0
-    last_upd = time.time() - 86400 + 600  # first check ~10 min after start
+    last_upd = time.time() - 6 * 3600 + 600  # first check ~10 min after start
     while True:
         t0 = time.time()
         try:
@@ -2741,7 +2741,7 @@ def daemon(cfg):
             except Exception as e:
                 log("report error: %r" % e)
             last_rep = time.time()
-        if cfg.get("update_check", "1") == "1" and time.time() - last_upd >= 86400:
+        if cfg.get("update_check", "1") == "1" and time.time() - last_upd >= 6 * 3600:
             try:
                 update_check(cfg)
             except Exception as e:

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.2
+- Settings shows the installed version at the top, with the update status (up to date, or a newer version with a link to install it) and when GitHub was last checked. The Updates section moved to the top of the page.
+- Updates are checked every 6 hours instead of once a day, so a new release shows up sooner. **Check now** refreshes the status in place.
+
 ## 1.2.1
 - **What's new** dialog shows the release notes as formatted text (bullets, bold) at normal size, instead of a small fixed-width block.
 
