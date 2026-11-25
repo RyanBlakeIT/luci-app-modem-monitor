@@ -26,7 +26,7 @@ Commands:
   modem-monitor weather [--fetch] [--json]   latest outdoor reading (fetch now with --fetch)
   modem-monitor credit [--month YYYY-MM] [--json]   outage totals and a credit-request letter
   modem-monitor backup   copy the data off the router now (see backup_dest)
-  modem-monitor speedtest [--background] [--json]   run a speed test now
+  modem-monitor speedtest [--background] [--json]   run a speed test now (--last: recent results)
   modem-monitor digest [--day YYYY-MM-DD] [--send]   the daily summary (default: yesterday)
   modem-monitor compress gzip monthly data files older than last month (also done daily)
   modem-monitor export   bundle all data + diagnostics into one .zip
@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.6.5"
+VERSION = "1.6.6"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -3526,14 +3526,47 @@ SPEED_COLS = ["ts", "time", "down_mbps", "up_mbps", "idle_ms", "loaded_ms", "dow
 
 
 def _speed_dir(url, seconds, max_bytes, streams, upload=False):
+    """One direction of the test: `streams` parallel connections for up to
+    `seconds`, stopping early at `max_bytes` in total (0 = no data limit).
+    Each stream repeats requests of up to 100 MB so long tests at gigabit
+    speed don't depend on one huge request."""
     import http.client, threading, urllib.parse
     u = urllib.parse.urlparse(url)
+    base = u.path.rstrip("/")
     total = [0]
     errs = []
     lock = threading.Lock()
     stop_at = time.monotonic() + seconds
     cafile = next((c for c in CA_FILES if os.path.exists(c)), None)
-    per = max(1, max_bytes // streams)
+    # Cloudflare refuses single requests near 100 MB, and from some connections
+    # far smaller ones: start at 25 MB and halve on a refusal (down to 1 MB).
+    req = [25 * 1000000]
+    reserved = [0]
+    ua = "Mozilla/5.0 (compatible; luci-app-modem-monitor/%s)" % VERSION
+
+    def room():
+        """Claim the next request's size, so parallel streams can't overshoot the limit."""
+        with lock:
+            size = req[0] if not max_bytes else max(0, min(req[0], max_bytes - reserved[0]))
+            reserved[0] += size
+            return size
+
+    def unclaim(n):
+        with lock:
+            reserved[0] -= n
+
+    def refused(size):
+        """Smaller requests after a 403; False once even 1 MB is refused."""
+        unclaim(size)
+        with lock:
+            if req[0] <= 1000000:
+                return False
+            req[0] = max(1000000, req[0] // 2)
+            return True
+
+    def add(n):
+        with lock:
+            total[0] += n
 
     def conn():
         if u.scheme == "https":
@@ -3541,43 +3574,55 @@ def _speed_dir(url, seconds, max_bytes, streams, upload=False):
                                                context=ssl.create_default_context(cafile=cafile))
         return http.client.HTTPConnection(u.hostname, u.port or 80, timeout=15)
 
-    ua = "Mozilla/5.0 (compatible; luci-app-modem-monitor/%s)" % VERSION
-
     def worker():
-        got = 0
         try:
             c = conn()
-            if upload:
-                c.putrequest("POST", (u.path.rstrip("/") or "") + "/__up")
-                c.putheader("User-Agent", ua)
-                c.putheader("Content-Type", "application/octet-stream")
-                c.putheader("Content-Length", str(per))
-                c.endheaders()
-                chunk = b"\0" * 65536
-                while got < per and time.monotonic() < stop_at:
-                    n = min(len(chunk), per - got)
-                    c.send(chunk[:n])
-                    got += n
-                    with lock:
-                        total[0] += n
-                if got >= per:
+            while time.monotonic() < stop_at:
+                size = room()
+                if size <= 0:
+                    break
+                if upload:
+                    c.putrequest("POST", base + "/__up")
+                    c.putheader("User-Agent", ua)
+                    c.putheader("Content-Type", "application/octet-stream")
+                    c.putheader("Content-Length", str(size))
+                    c.endheaders()
+                    chunk, sent = b"\0" * 65536, 0
+                    while sent < size and time.monotonic() < stop_at:
+                        n = min(len(chunk), size - sent)
+                        c.send(chunk[:n])
+                        sent += n
+                        add(n)
+                    if sent < size:
+                        break  # out of time mid-request; the connection is abandoned
                     r = c.getresponse()
                     r.read()
+                    if r.status == 403 and refused(size):
+                        c.close()
+                        c = conn()
+                        continue
                     if r.status >= 400:
-                        errs.append("upload refused: HTTP %d %s" % (r.status, r.reason))
-            else:
-                c.request("GET", "%s/__down?bytes=%d" % (u.path.rstrip("/") or "", per),
-                          headers={"User-Agent": ua, "Accept": "*/*"})
-                r = c.getresponse()
-                if r.status != 200:
-                    body = r.read(300).decode("utf-8", "replace")
-                    raise ModemError("download refused: HTTP %d %s %s" % (r.status, r.reason, " ".join(body.split())[:120]))
-                while time.monotonic() < stop_at:
-                    b = r.read(65536)
-                    if not b:
+                        raise ModemError("upload refused: HTTP %d %s" % (r.status, r.reason))
+                else:
+                    c.request("GET", "%s/__down?bytes=%d" % (base, size), headers={"User-Agent": ua, "Accept": "*/*"})
+                    r = c.getresponse()
+                    if r.status != 200:
+                        body = r.read(300).decode("utf-8", "replace")
+                        if r.status == 403 and refused(size):
+                            c.close()
+                            c = conn()
+                            continue
+                        raise ModemError("download refused: HTTP %d %s %s" % (r.status, r.reason, " ".join(body.split())[:120]))
+                    got = 0
+                    while time.monotonic() < stop_at:
+                        b = r.read(65536)
+                        if not b:
+                            break
+                        got += len(b)
+                        add(len(b))
+                    if got < size:
+                        unclaim(size - got)
                         break
-                    with lock:
-                        total[0] += len(b)
             c.close()
         except Exception as e:
             errs.append(str(e))
@@ -3596,12 +3641,20 @@ def _speed_dir(url, seconds, max_bytes, streams, upload=False):
     return round(total[0] * 8 / el / 1e6, 1), round(total[0] / 1e6, 1)
 
 
+SPEED_LOCK = "/tmp/modem-monitor-speedtest.running"
+
+
 def speed_test(cfg):
     url = (cfg.get("speedtest_url") or "https://speed.cloudflare.com").rstrip("/")
     secs = max(3, int(fnum(cfg, "speedtest_seconds")))
-    cap = max(10, int(fnum(cfg, "speedtest_max_mb"))) * 1000000
+    mb = int(fnum(cfg, "speedtest_max_mb"))
+    cap = 0 if mb <= 0 else max(10, mb) * 1000000  # 0 = unlimited (time limit only)
     now = time.time()
     row = {"ts": int(now), "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), "server": url, "error": ""}
+    try:
+        open(SPEED_LOCK, "w").close()
+    except OSError:
+        pass
     tgt = (load_state(cfg).get("probe") or {}).get("target") or probe_target(cfg)
     try:
         p = Prober(tgt).start()
@@ -3628,6 +3681,10 @@ def speed_test(cfg):
     except Exception as e:
         row["error"] = repr(e)[:200]
     append_csv(os.path.join(cfg["data_dir"], "speedtest.csv"), SPEED_COLS, [row])
+    try:
+        os.remove(SPEED_LOCK)
+    except OSError:
+        pass
     return row
 
 
@@ -4620,6 +4677,20 @@ def main():
             save_state(cfg, st)
             sys.exit(1)
         save_state(cfg, st)
+    elif cmd == "speedtest" and "--last" in args:
+        rows = read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], 0)[-5:]
+        st = load_state(cfg)
+        nxt = None
+        if cfg.get("speedtest_enabled", "0") == "1":
+            lt = time.localtime()
+            h, m = int(fnum(cfg, "speedtest_hour")), st.get("speed_min", 0)
+            t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, 0, 0, 0, -1))
+            if st.get("speed_day") == time.strftime("%Y-%m-%d", lt) or t <= time.time():
+                t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + 1, h, m, 0, 0, 0, -1))
+            nxt = int(t)
+        running = os.path.exists(SPEED_LOCK) and time.time() - os.path.getmtime(SPEED_LOCK) < 300
+        print(json.dumps({"rows": [{k: r.get(k, "") for k in SPEED_COLS} for r in reversed(rows)],
+                          "next": nxt, "running": running}))
     elif cmd == "speedtest":
         if "--background" in args:
             subprocess.Popen([sys.executable, os.path.abspath(__file__), "speedtest"], stdin=subprocess.DEVNULL,

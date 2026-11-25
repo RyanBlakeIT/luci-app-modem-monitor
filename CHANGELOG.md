@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.6
+- **Speed test downloads work with Cloudflare's request limits.** Cloudflare refuses single requests near 100 MB, and from some connections much smaller ones (HTTP 403). Each stream now makes repeated 25 MB requests and halves the size on a refusal, down to 1 MB, so the test fills its time window at any speed.
+- **Data limit is exact:** parallel streams reserve their share before requesting, so a 150 MB limit transfers 150 MB, not up to 4x that.
+- **Unlimited data option** (time limit only), plus presets of 100, 250, 500, 1000 and 2000 MB, or any number you type.
+- **Recent results on Settings → Speed tests:** last run and next scheduled time, plus the last five results (down/up speed, latency idle/loaded, data used, any error). **Run a speed test now** shows progress and updates the list when the test finishes.
+- CLI: `modem-monitor speedtest --last --json`.
+
 ## 1.6.5
 - **Speed test fixes:** the server's answer is now checked. A refused or empty download used to be recorded as "0 Mb/s"; now its reason (HTTP status) appears on the report, and the other direction still runs. Requests identify themselves with a browser-style User-Agent, and a direction that moves under 1 MB counts as failed rather than as a speed.
 - The plan-speed fields only accept 1-10,000 Mb/s, and the report ignores larger values, so a number in the wrong unit (e.g. 50000) no longer flattens the chart.

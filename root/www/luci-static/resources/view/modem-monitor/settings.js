@@ -62,12 +62,15 @@ return view.extend({
 			}), null),
 			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'weather', '--json', '--net' ]).then(function(r) {
 				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
+			}), null),
+			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'speedtest', '--last', '--json' ]).then(function(r) {
+				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
 			}), null)
 		]);
 	},
 
 	render: function(data) {
-		var m, s, o, ver = data[0], upd = data[1], wx = data[2], self = this;
+		var m, s, o, ver = data[0], upd = data[1], wx = data[2], sp = data[3], self = this;
 
 		m = new form.Map('modem_monitor', _('Cable Modem Monitor'),
 			_('Polls the cable modem (tested with the Arris SURFboard S33) for signal levels, error counters and its event log, and pings the internet, every few minutes. Save & Apply, then use "Test connection" on the Modem tab.') + ' ' + versionLine(ver, upd));
@@ -384,10 +387,13 @@ return view.extend({
 		o.placeholder = '10';
 		o.depends('speedtest_enabled', '1');
 
-		o = s.option(form.Value, 'speedtest_max_mb', _('Data limit per direction (MB)'));
-		o.datatype = 'range(10,5000)';
-		o.placeholder = '250';
-		o.depends('speedtest_enabled', '1');
+		o = s.option(form.Value, 'speedtest_max_mb', _('Data limit per direction (MB)'),
+			_('The test stops at this much data or at the time limit, whichever comes first. Unlimited uses only the time limit: at gigabit speed that is about 1.2 GB per direction for a 10-second test. Pick from the list or type a number.'));
+		o.value('0', _('Unlimited (time limit only)'));
+		[ '100', '250', '500', '1000', '2000' ].forEach(function(v) { o.value(v, v + ' MB'); });
+		o.datatype = 'or("0", range(10,100000))';
+		o.default = '250';
+		o.rmempty = false;
 
 		o = s.option(form.Value, 'plan_down', _('Plan download (Mb/s)'), _('Optional, in megabits per second (e.g. 1000 for a gigabit plan). Shown on the chart; the complaint summary counts tests below 80% of it.'));
 		o.datatype = 'range(1,10000)';
@@ -400,12 +406,47 @@ return view.extend({
 		o.placeholder = 'https://speed.cloudflare.com';
 		o.depends('speedtest_enabled', '1');
 
-		o = s.option(form.Button, '_speed_now', _('Test'));
+		var fmtTs = function(ts) { return ts ? new Date(ts * 1000).toLocaleString() : '–'; };
+		var speedHtml = function(d) {
+			if (!d) return _('No results yet.');
+			var R = d.rows || [], n = function(v) { return (v === '' || v == null) ? '–' : v; };
+			var head = '<div>' + _('Last run: %s').format('<strong>' + (R.length ? fmtTs(+R[0].ts) : _('never')) + '</strong>') +
+				(d.running ? ' · <span class="spinning">' + _('a test is running now…') + '</span>' : '') +
+				(d.next ? ' · ' + _('next scheduled: %s').format(fmtTs(d.next)) : ' · ' + _('daily tests are off')) + '</div>';
+			if (!R.length) return head;
+			var rows = R.map(function(r) {
+				return '<tr><td style="white-space:nowrap;padding:2px 10px 2px 0">' + fmtTs(+r.ts) + '</td>' +
+					'<td style="text-align:right;padding:2px 10px">' + n(r.down_mbps) + '</td><td style="text-align:right;padding:2px 10px">' + n(r.up_mbps) + '</td>' +
+					'<td style="text-align:right;padding:2px 10px">' + n(r.idle_ms) + ' / ' + n(r.loaded_ms) + '</td>' +
+					'<td style="text-align:right;padding:2px 10px">' + n(r.down_mb) + ' / ' + n(r.up_mb) + '</td>' +
+					'<td style="padding:2px 0 2px 10px;color:#c42b2b">' + (r.error ? String(r.error).replace(/[<>&]/g, '') : '') + '</td></tr>';
+			}).join('');
+			return head + '<table style="margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums"><tr style="opacity:.75"><th style="text-align:left;padding:2px 10px 2px 0">' + _('When') +
+				'</th><th style="padding:2px 10px">' + _('Down Mb/s') + '</th><th style="padding:2px 10px">' + _('Up Mb/s') + '</th><th style="padding:2px 10px">' + _('Latency idle / load (ms)') +
+				'</th><th style="padding:2px 10px">' + _('Data down / up (MB)') + '</th><th></th></tr>' + rows + '</table>';
+		};
+		o = s.option(form.DummyValue, '_speed_last', _('Recent results'));
+		o.rawhtml = true;
+		o.cfgvalue = function() { return '<div id="mm-speed">' + speedHtml(sp) + '</div>'; };
+
+		o = s.option(form.Button, '_speed_now', ' ');
 		o.inputtitle = _('Run a speed test now');
 		o.inputstyle = 'action';
 		o.onclick = function() {
-			return fs.exec('/usr/bin/modem-monitor', [ 'speedtest', '--background' ]).then(function(res) {
-				ui.addNotification(null, E('p', {}, ((res.stdout || '') + (res.stderr || '')).trim()), 'info');
+			var el = document.getElementById('mm-speed'), before = sp && sp.rows && sp.rows[0] ? sp.rows[0].ts : null, tries = 0;
+			var refresh = function() {
+				return L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'speedtest', '--last', '--json' ]), null).then(function(r) {
+					var d = null;
+					try { d = r ? JSON.parse(r.stdout || 'null') : null; } catch (e) {}
+					if (d) { sp = d; if (el) el.innerHTML = speedHtml(d); }
+					var done = d && d.rows && d.rows[0] && d.rows[0].ts !== before && !d.running;
+					if (!done && ++tries < 30)
+						return new Promise(function(res) { setTimeout(res, 4000); }).then(refresh);
+				});
+			};
+			return fs.exec('/usr/bin/modem-monitor', [ 'speedtest', '--background' ]).then(function() {
+				if (el) el.insertAdjacentHTML('afterbegin', '<div class="spinning">' + _('Running: about %d seconds…').format(2 * (+uci.get('modem_monitor', 'main', 'speedtest_seconds') || 10) + 10) + '</div>');
+				return new Promise(function(res) { setTimeout(res, 3000); }).then(refresh);
 			});
 		};
 
