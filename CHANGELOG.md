@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.0
+Each of these can be turned on or off under Settings.
+- **1-second latency probe** (Settings → Line quality; off by default): one small ping per second to the ISP gateway, or an address you choose, run inside the monitor. Each sample records jitter, p95 and worst latency, the share of pings lost, **short dropouts** (2+ seconds without a reply, adjustable) and the longest one. It shows up in:
+  - report tiles and charts, plus incidents
+  - alerts (new **Short dropouts** type)
+  - the daily summary and the complaint summary
+  - Prometheus metrics and Home Assistant sensors
+- **Channel watch** (on by default): flags samples where the modem holds fewer bonded channels than its most in the last 24 hours (partial service). Shown as a report tile and incidents, alerted as **Modem lost channels** (and when they come back), and counted in the complaint summary.
+- **Daily summary** (Settings → Alerts; off by default): one notification each morning at a time you choose, summarizing yesterday as a "Clean day" or "Problems" line. It's also published to MQTT. **Send yesterday's summary now** button, and `modem-monitor digest [--day] [--send]`.
+- **Status → Overview tile** (on by default): modem state, levels, channel counts, today's T3/T4 and uncorrectables, packet loss, jitter and dropouts, and the age of the last sample, with a link to the report.
+
 ## 1.4.1
 - The install-update dialog leads with a plain result ("Version X is installed", and whether the package signature was required) in normal-size text. The raw log is in a collapsible section in larger type, opened automatically if something failed.
 - Upgrades no longer leave `/etc/config/modem_monitor.apk-new` behind. Your settings are kept as before; new options take their defaults from the program.

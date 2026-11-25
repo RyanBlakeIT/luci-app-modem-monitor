@@ -80,6 +80,11 @@ return view.extend({
 			_('Optional. Shown in the report title and text, e.g. "Comcast" or "Spectrum".'));
 		o.placeholder = _('your ISP');
 
+		o = s.option(form.Flag, 'overview_tile', _('Tile on Status → Overview'),
+			_('Shows current levels and today\'s errors on the router\'s main status page.'));
+		o.default = '1';
+		o.rmempty = false;
+
 		o = s.option(form.Value, 'report_title', _('Report title'),
 			_('Optional. Replaces "Cable modem signal report".'));
 		o.optional = true;
@@ -167,6 +172,27 @@ return view.extend({
 		o = s.option(form.Value, 'ping_targets', _('Ping targets'), _('Space-separated.'));
 		o.placeholder = '1.1.1.1 8.8.8.8';
 
+		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Line quality'));
+
+		o = s.option(form.Flag, 'hires_ping', _('1-second latency probe'),
+			_('Sends one small ping per second (about 1 KB/s) to catch jitter and short dropouts of a few seconds that the regular samples miss. Shown on the report, in alerts, the daily summary and the complaint summary.'));
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'hires_target', _('Probe target'),
+			_('"gateway" = the ISP\'s first hop past the modem (recommended: it measures your cable segment). Or an address such as 1.1.1.1. Some ISP gateways answer pings at low priority, which can add occasional latency spikes of their own.'));
+		o.placeholder = 'gateway';
+		o.depends('hires_ping', '1');
+
+		o = s.option(form.Value, 'hires_drop_min', _('Seconds without reply that count as a dropout'));
+		o.datatype = 'range(1,30)';
+		o.placeholder = '2';
+		o.depends('hires_ping', '1');
+
+		o = s.option(form.Flag, 'channel_watch', _('Watch for missing channels'),
+			_('Flags samples where the modem holds fewer bonded channels than it did in the last 24 hours (partial service), on the report and in alerts.'));
+		o.default = '1';
+		o.rmempty = false;
+
 		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Network path & weather'));
 
 		o = s.option(form.Flag, 'gw_ping', _('Ping the ISP gateway'),
@@ -236,7 +262,9 @@ return view.extend({
 		o.value('uncorr', _('Uncorrectable error spike'));
 		o.value('us_power', _('Upstream power above the guideline'));
 		o.value('loss', _('Packet loss'));
-		o.default = 'outage reboot relock t3t4 uncorr us_power loss';
+		o.value('channels', _('Modem lost bonded channels'));
+		o.value('dropouts', _('Short dropouts (needs the 1-second probe)'));
+		o.default = 'outage reboot relock t3t4 uncorr us_power loss channels dropouts';
 		o.depends('alert_enabled', '1');
 
 		o = s.option(form.Value, 'alert_ntfy_url', _('ntfy topic or URL'),
@@ -273,12 +301,34 @@ return view.extend({
 		  [ 'alert_uncorr', _('Uncorrectables in one sample'), '5000', 'uinteger' ],
 		  [ 'alert_loss', _('Packet loss in one sample (%)'), '20', 'range(1,100)' ],
 		  [ 'alert_outage_polls', _('Failed samples in a row before "unreachable"'), '2', 'range(1,12)' ],
+		  [ 'alert_dropouts', _('Short dropouts in one sample'), '3', 'range(1,300)' ],
 		  [ 'alert_cooldown_min', _('Repeat the same alert at most every (minutes)'), '60', 'range(0,1440)' ] ].forEach(function(f) {
 			o = s.option(form.Value, f[0], f[1]);
 			o.placeholder = f[2];
 			o.datatype = f[3];
 			o.depends('alert_enabled', '1');
 		});
+
+		o = s.option(form.Flag, 'daily_digest', _('Daily summary'),
+			_('Each morning, one notification summarizing yesterday (timeouts, errors, levels, outages, dropouts), sent to the channels above. Quiet days are worth having on record too.'));
+		o.rmempty = false;
+		o.depends('alert_enabled', '1');
+
+		o = s.option(form.ListValue, 'digest_hour', _('Send the daily summary at'));
+		for (var h = 0; h < 24; h++)
+			o.value(String(h), '%02d:00'.format(h));
+		o.default = '8';
+		o.depends('daily_digest', '1');
+
+		o = s.option(form.Button, '_digest_test', _('Daily summary'));
+		o.inputtitle = _('Send yesterday\'s summary now');
+		o.inputstyle = 'action';
+		o.depends('daily_digest', '1');
+		o.onclick = function() {
+			return fs.exec('/usr/bin/modem-monitor', [ 'digest', '--send' ]).then(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' }, ((res.stdout || '') + (res.stderr || '')).trim()), 'info');
+			});
+		};
 
 		o = s.option(form.Button, '_alert_test', _('Test'));
 		o.inputtitle = _('Send a test alert');

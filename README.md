@@ -21,6 +21,10 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 - **ISP gateway ping and traceroutes:** each sample also pings the first hop past the modem. Loss there too means the problem is on the local cable segment. A traceroute is saved automatically during packet loss.
 - **Weather:** optional outdoor temperature and precipitation from Open-Meteo (free, no account), with a note when upstream power, downstream power or errors follow temperature or rain, which is typical of corroded connectors and water in outdoor cabling.
 - **Integrations:** Prometheus metrics at `/modem-monitor/metrics.txt`, Home Assistant sensors through MQTT discovery (needs `mosquitto-client`), and a Zabbix template in `examples/zabbix/`.
+- **1-second latency probe (optional):** one small ping per second to the ISP gateway catches jitter and dropouts of a few seconds that 5-minute samples miss. Shown on the report, in alerts, the daily summary and the complaint summary.
+- **Channel watch:** flags samples where the modem holds fewer bonded channels than it did in the last 24 hours (partial service), with an alert.
+- **Daily summary:** an optional morning notification with yesterday's timeouts, errors, levels, outages and dropouts.
+- **Status → Overview tile:** current levels and today's errors on the router's main status page.
 - **Download all data:** one `.zip` with every CSV, the report and a diagnostics snapshot. MAC addresses and public IP addresses are masked by default.
 - **Updates:** checks GitHub for a newer release every 6 hours and offers to install it from the Signal Report page. The download is verified against GitHub's published SHA-256 checksum, and nothing is installed without your click.
 - **`latest.json`:** the newest sample, for Zabbix or other monitoring.
@@ -75,6 +79,11 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 | `data_dir` | auto (see Install) | CSV history (persistent storage) |
 | `retention_days` | auto: 400 / 180 / 90 | History older than this is deleted |
 | `modem_type` | `auto` | `auto`, `s33` (S33/S34), `arris_html` (SB8200/SB6183/SB6190), `netgear` |
+| `hires_ping`, `hires_target`, `hires_drop_min` | `0`, `gateway`, `2` | 1-second probe on/off, target (`gateway` or an address), lost seconds that count as a dropout |
+| `channel_watch` | `1` | Flag and alert on missing bonded channels |
+| `daily_digest`, `digest_hour` | `0`, `8` | Morning summary of yesterday via the alert channels |
+| `overview_tile` | `1` | Tile on Status → Overview |
+| `alert_dropouts` | `3` | Short dropouts in one sample before alerting |
 | `compress_old` | `1` | gzip monthly files older than last month |
 | `wan_device` | *(auto)* | Modem-facing port; auto = device of the `wan` interface |
 | `modem_route` | `host` | How the router reaches the modem: `host` route, `alias` address, or `off` |
@@ -116,6 +125,7 @@ modem-monitor maint-confirm ID | maint-del ID
 modem-monitor maint-import FILE.csv         # columns: time,end_time,type,note[,source]
 modem-monitor summary [--from YYYY-MM-DD] [--to YYYY-MM-DD]   # printable complaint summary (default: last 30 days)
 modem-monitor alert-test                    # send a test notification to every configured channel
+modem-monitor digest [--day YYYY-MM-DD] [--send]   # the daily summary (default: yesterday)
 modem-monitor compress                      # gzip monthly files older than last month (also daily)
 modem-monitor export [--full]               # one .zip; --full keeps MAC/public IP addresses
 modem-monitor update-check [--json]         # is a newer release on GitHub?

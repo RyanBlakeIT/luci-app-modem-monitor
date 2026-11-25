@@ -23,6 +23,7 @@ Commands:
                          one-page printable summary for a complaint (default: last 30 days);
                          disruption from planned work is left out unless --all
   modem-monitor alert-test   send a test notification to every configured alert channel
+  modem-monitor digest [--day YYYY-MM-DD] [--send]   the daily summary (default: yesterday)
   modem-monitor compress gzip monthly data files older than last month (also done daily)
   modem-monitor export   bundle all data + diagnostics into one .zip
                          (MAC/public IP addresses masked; --full keeps them)
@@ -50,7 +51,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -73,7 +74,15 @@ DEFAULTS = {
     "ds_power_max": "7",
     "ds_snr_min": "33",
     "timeout": "15",
-    "compress_old": "1",   # gzip monthly files older than last month
+    "compress_old": "1",
+    "hires_ping": "0",          # 1 ping per second for jitter / short dropouts
+    "hires_target": "gateway",  # "gateway" (ISP first hop) or an address
+    "hires_drop_min": "2",      # lost pings in a row that count as a dropout
+    "channel_watch": "1",       # flag samples where locked channels went missing
+    "daily_digest": "0",        # morning summary of yesterday via the alert channels
+    "digest_hour": "8",
+    "overview_tile": "1",       # tile on Status > Overview
+    "alert_dropouts": "3",      # short dropouts in one sample before alerting   # gzip monthly files older than last month
     "modem_type": "auto",  # auto, s33 (HNAP: S33/S34), arris_html (SB8200/SB6183/SB6190), netgear
     "wan_device": "",  # empty = auto-detect from the 'wan' interface
     "update_check": "1",  # check GitHub for a newer release once a day
@@ -87,7 +96,7 @@ DEFAULTS = {
     "modem_led": "1",
     # Alerts: off until a channel is configured and alert_enabled=1
     "alert_enabled": "0",
-    "alert_on": "outage reboot relock t3t4 uncorr us_power loss",
+    "alert_on": "outage reboot relock t3t4 uncorr us_power loss channels dropouts",
     "alert_ntfy_url": "",       # https://ntfy.sh/<topic>, a self-hosted URL, or just a topic name
     "alert_ntfy_token": "",
     "alert_pushover_user": "",
@@ -1198,7 +1207,9 @@ SUMMARY_COLS = ["ts", "time", "ok", "error", "uptime_s", "rebooted", "relock",
                 "corr_total", "uncorr_total", "uncorr_delta",
                 "us_count", "us_locked", "us_power_min", "us_power_max",
                 "ping_loss", "ping_avg_ms", "ping_max_ms", "ds_power_avg", "us_power_avg",
-                "gw_loss", "gw_avg_ms", "temp", "precip"]
+                "gw_loss", "gw_avg_ms", "temp", "precip",
+                "hr_sent", "hr_loss", "hr_avg", "hr_p95", "hr_max", "hr_jitter", "hr_drops", "hr_longest",
+                "ds_base", "us_base"]
 CHANNEL_COLS = ["ts", "time", "dir", "ch", "lock", "mod", "freq_mhz", "power", "snr", "corr", "uncorr"]
 EVENT_COLS = ["ts", "time", "modem_date", "modem_time", "prio", "type", "message"]
 
@@ -1462,6 +1473,8 @@ def poll(cfg):
     row["ping_loss"] = rnd(sum(losses) / len(losses)) if losses else ""
     row["ping_avg_ms"] = rnd(sum(avgs) / len(avgs)) if avgs else ""
     row["ping_max_ms"] = rnd(max(maxs)) if maxs else ""
+    if PROBER is not None:
+        row.update(probe_stats(PROBER.take(), max(1, int(fnum(cfg, "hires_drop_min")))))
     row["gw_loss"] = row["gw_avg_ms"] = ""
     if cfg.get("gw_ping", "1") == "1":
         gw = isp_gateway(cfg)
@@ -1605,6 +1618,10 @@ def poll(cfg):
         log("auto-suggest error: %r" % e)
 
     try:
+        row["_lost_ch"] = channel_watch(cfg, st, row, now)
+    except Exception as e:
+        log("channel watch error: %r" % e)
+    try:
         alert_check(cfg, st, row, events_new, chd, chinfo, now)
     except Exception as e:
         log("alert error: %r" % e)
@@ -1616,7 +1633,14 @@ def poll(cfg):
     for e in events_new:
         if e["time"][:10] == day:
             td[e["type"]] = td.get(e["type"], 0) + 1
+    if row.get("ok") == 1 and row.get("rebooted") != 1:
+        td["uncorr"] = td.get("uncorr", 0) + int(row.get("uncorr_delta") or 0)
+    td["drops"] = td.get("drops", 0) + int(row.get("hr_drops") or 0)
     st["today"] = td
+    row["today"] = {k: v for k, v in td.items() if k != "day"}
+    row["tile"] = cfg.get("overview_tile", "1")
+    row["isp"] = (cfg.get("isp_name") or "").strip()
+    row["lost_ch"] = " and ".join(row.pop("_lost_ch", None) or [])
     try:
         write_metrics(cfg, st, row, ds, us)
     except Exception as e:
@@ -1770,6 +1794,9 @@ def build_report(cfg):
                      {"name": "ISP gateway (first hop)", "pts": bucketize([(int(r["ts"]), fv(r, "gw_loss")) for r in s], b, "max")}],
             "latency": [{"name": "Internet", "pts": bucketize([(int(r["ts"]), fv(r, "ping_avg_ms")) for r in s], b, "avg")},
                         {"name": "ISP gateway (first hop)", "pts": bucketize([(int(r["ts"]), fv(r, "gw_avg_ms")) for r in s], b, "avg")}],
+            "drops": [{"name": "Short dropouts", "pts": bucketize([(int(r["ts"]), fv(r, "hr_drops")) for r in s], b, "sum")}],
+            "jitter": [{"name": "Worst 5% latency (p95)", "pts": bucketize([(int(r["ts"]), fv(r, "hr_p95")) for r in s], b, "max")},
+                       {"name": "Jitter", "pts": bucketize([(int(r["ts"]), fv(r, "hr_jitter")) for r in s], b, "max")}],
             "temp": [{"name": "Outdoor temperature", "pts": bucketize([(int(r["ts"]), fv(r, "temp")) for r in s], max(b, 1800), "avg")}],
             "link_err": [{"name": "Link errors", "pts": bucketize([(int(r["ts"]), r["_err"]) for r in lk], b, "sum")}],
             "missed": [{"name": "Missed packets", "pts": bucketize([(int(r["ts"]), r["_missed"]) for r in lk], b, "sum")}],
@@ -1795,6 +1822,9 @@ def build_report(cfg):
             "link_dev": lk[-1]["dev"] if lk else "",
             "link_speed": lk[-1]["speed"] if lk else "",
             "link_on": bool(lk),
+            "drops": int(sum(fv(r, "hr_drops") or 0 for r in s)),
+            "longest": int(max([fv(r, "hr_longest") or 0 for r in s] + [0])),
+            "lostch": sum(1 for r in s if fv(r, "ds_base") is not None and ((fv(r, "ds_locked") or 0) < fv(r, "ds_base") or (fv(r, "us_locked") or 0) < (fv(r, "us_base") or 0))),
         }
         data["ranges"][name] = {"bucket": b, "series": series, "tiles": tiles, "span": span}
 
@@ -1850,7 +1880,10 @@ def build_report(cfg):
     data["daylist"] = daylist
     data["samples"] = [[int(r["ts"]), 1 if modem_down(r) else 0, 1 if r["_reb"] else 0, 1 if r["_rel"] else 0,
                         int(fv(r, "uncorr_delta") or 0) if r.get("ok") == "1" else 0, fv(r, "us_power_max"),
-                        fv(r, "ping_loss"), di[r["time"][:10]]] for r in summ]
+                        fv(r, "ping_loss"), di[r["time"][:10]], int(fv(r, "hr_drops") or 0),
+                        1 if fv(r, "ds_base") is not None and ((fv(r, "ds_locked") or 0) < fv(r, "ds_base") or
+                                                               (fv(r, "us_locked") or 0) < (fv(r, "us_base") or 0)) else 0]
+                       for r in summ]
     data["evc"] = [[int(e["ts"]), e["type"], di[e["time"][:10]]] for e in events
                    if e["type"] in ("T3", "T4", "SYNC", "PROVISION", "DRW")]
     data["lk"] = [[int(r["ts"]), r["_err"], r["_missed"], int(fv(r, "link_drops") or 0), di[r["time"][:10]]]
@@ -1862,6 +1895,7 @@ def build_report(cfg):
     data["weather_on"] = bool((cfg.get("weather_lat") or "").strip()) or any(fv(r, "temp") is not None for r in summ)
     data["weather_notes"] = weather_text(weather_effects(summ), unit) if data["weather_on"] else []
     data["traces"] = read_traces(cfg, now - 30 * 86400)
+    data["hires_on"] = cfg.get("hires_ping", "0") == "1" or any(fv(r, "hr_sent") for r in summ)
     data["title"] = cfg.get("report_title", "").strip()
     data["note"] = cfg.get("report_note", "").strip()
     data.pop("days", None)  # the page builds the daily table itself (see "samples")
@@ -1874,6 +1908,17 @@ def build_report(cfg):
         elif r["_rel"]:
             outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
                          "why": "Modem lost signal and re-registered (no reboot; uptime kept counting)"})
+    for r in summ:
+        if fv(r, "ds_base") is not None and r.get("ok") == "1":
+            dl, db = int(fv(r, "ds_locked") or 0), int(fv(r, "ds_base"))
+            ul, ub = int(fv(r, "us_locked") or 0), int(fv(r, "us_base") or 0)
+            if dl < db or ul < ub:
+                outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
+                             "why": "Channels missing: %d of %d downstream, %d of %d upstream locked" % (dl, db, ul, ub)})
+        if (fv(r, "hr_drops") or 0) > 0:
+            outs.append({"start": int(r["ts"]), "end": int(r["ts"]), "polls": 0,
+                         "why": "%d short dropout%s (longest %d s) in 1-second pings" % (
+                             int(fv(r, "hr_drops")), "" if int(fv(r, "hr_drops")) == 1 else "s", int(fv(r, "hr_longest") or 0))})
     for r in links:
         n = int(fv(r, "link_drops") or 0)
         if n:
@@ -2078,6 +2123,8 @@ const CH=[
  {id:"latency",title:"Ping latency",unit:"ms",note:"Average round-trip time to the internet and to the ISP gateway."},
  {id:"link_err",title:"Router\u2013modem Ethernet errors",unit:"per interval",bars:true,note:"CRC, alignment and collision counters on the router's WAN port. Should stay at zero; errors here point to the router\u2013modem cable or ports, not "+(D.isp||"your ISP")+"."},
  {id:"missed",title:"Router NIC missed packets",unit:"per interval",bars:true,note:"Packets the router's WAN port dropped because its receive buffer filled (router CPU/IRQ load). A router tuning issue, not a line or cable fault."}];
+if(D.hires_on){CH.push({id:"drops",title:"Short dropouts",unit:"count",bars:true,note:"From one ping per second to "+(D.isp||"the ISP")+"\u2019s gateway: runs of lost pings too short for the regular samples to catch (they show up in games and calls as freezes)."});
+ CH.push({id:"jitter",title:"Jitter and worst latency",unit:"ms",note:"From the 1-second pings: p95 is the latency the slowest 5% of pings exceeded; jitter is the average change between consecutive pings."})}
 if(D.weather_on)CH.push({id:"temp",title:"Outdoor temperature",unit:D.temp_unit,note:(D.weather_notes&&D.weather_notes.length?D.weather_notes.join(" "):"From Open-Meteo for the configured location. Compare with upstream power and errors: faults in outdoor cabling often change with temperature or rain.")});
 const fmtT=(t,span)=>{const d=new Date(t*1000);return span<=86400*1.2?d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):span<=86400*4?d.toLocaleDateString([], {month:"short",day:"numeric"})+" "+d.toLocaleTimeString([], {hour:"numeric"}):d.toLocaleDateString([], {month:"short",day:"numeric"})};
 const fmtFull=t=>new Date(t*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
@@ -2124,15 +2171,17 @@ function chart(c,rg){
  svg.addEventListener("mouseleave",()=>{tip.style.display="none";xh.style.display="none"});
  return card}
 function count(lo){
- const t={T3:0,T4:0,DRW:0,uncorr:0,us_max:null,reboots:0,relocks:0,failed:0,loss_polls:0,polls:0,link_err:0,missed:0,missed_flag:false,link_drops:0};
+ const t={T3:0,T4:0,DRW:0,uncorr:0,us_max:null,reboots:0,relocks:0,failed:0,loss_polls:0,polls:0,link_err:0,missed:0,missed_flag:false,link_drops:0,drops:0,lostch:0};
  (D.evc||[]).forEach(e=>{if(e[0]>=lo&&(e[1]==="T3"||e[1]==="T4"||e[1]==="DRW"))t[e[1]]++});
- (D.samples||[]).forEach(r=>{if(r[0]<lo)return;t.polls++;t.failed+=r[1];t.reboots+=r[2];t.relocks+=r[3];t.uncorr+=r[4];if(r[5]!=null)t.us_max=t.us_max==null?r[5]:Math.max(t.us_max,r[5]);if((r[6]||0)>0)t.loss_polls++});
+ (D.samples||[]).forEach(r=>{if(r[0]<lo)return;t.polls++;t.failed+=r[1];t.reboots+=r[2];t.relocks+=r[3];t.uncorr+=r[4];t.drops+=r[8]||0;t.lostch+=r[9]||0;if(r[5]!=null)t.us_max=t.us_max==null?r[5]:Math.max(t.us_max,r[5]);if((r[6]||0)>0)t.loss_polls++});
  (D.lk||[]).forEach(r=>{if(r[0]<lo)return;t.link_err+=r[1];t.missed+=r[2];t.link_drops+=r[3];if(r[2]>100)t.missed_flag=true});
  return t}
 function tiles(rg){const t=count(Math.max(D.now-rg.span,SINCE||0)),u=T.us_power_max,li=D.link_info||{};
  const items=[["T3 timeouts",t.T3,"upstream ranging failures",t.T3>0],["T4 timeouts",t.T4,"modem lost contact, reset",t.T4>0],["Upstream power warnings",t.DRW,"dynamic range window violations",t.DRW>0],["Uncorrectable codewords",t.uncorr.toLocaleString(),"damaged downstream data",t.uncorr>0],
   ["Peak upstream power",t.us_max==null?"\u2013":t.us_max+" dBmV","guideline max "+u,t.us_max!=null&&t.us_max>u],["Modem reboots",t.reboots,"uptime reset",t.reboots>0],["Re-registrations",t.relocks,"lost signal, no reboot",t.relocks>0],
   ["Modem unreachable",t.failed,"of "+t.polls+" samples",t.failed>0],["Samples with packet loss",t.loss_polls,"of "+t.polls+" samples",t.loss_polls>0]];
+ if(D.hires_on)items.push(["Short dropouts",t.drops,"from 1-second pings",t.drops>0]);
+ items.push(["Samples with missing channels",t.lostch,"partial service",t.lostch>0]);
  if((D.lk||[]).length)items.push(["Router\u2013modem Ethernet errors",t.link_err,t.link_drops+" link drop"+(t.link_drops===1?"":"s")+" \u00b7 "+(li.dev||"WAN")+(li.speed?" "+li.speed+" Mb/s":""),t.link_err>0||t.link_drops>0]);
  if((D.lk||[]).length&&t.missed)items.push(["Router NIC missed packets",t.missed.toLocaleString(),t.missed_flag?"over 100 in one sample: router tuning":"receive-buffer overruns",t.missed_flag]);
  $("#tiles").innerHTML=items.map(i=>"<div class='tile"+(i[3]?" bad":"")+"'><div class=k>"+esc(i[0])+"</div><div class=v>"+esc(i[1])+"</div><div class=n>"+esc(i[2])+"</div></div>").join("")}
@@ -2326,7 +2375,7 @@ def heat_matrix(m, info, lo, size, now):
 # Alerts (ntfy, Pushover, Telegram, webhook, email)
 # --------------------------------------------------------------------------
 
-ALERT_KINDS = ["outage", "reboot", "relock", "t3t4", "uncorr", "us_power", "loss"]
+ALERT_KINDS = ["outage", "reboot", "relock", "t3t4", "uncorr", "us_power", "loss", "channels", "dropouts"]
 
 
 def _http_post(url, body, headers=None, timeout=15):
@@ -2501,11 +2550,26 @@ def alert_check(cfg, st, row, events_new, chd, info, now):
             found.append(("uncorr", "Downstream errors spiking",
                           "%s uncorrectable codewords in the last sample.%s" % ("{:,}".format(int(unc)), where), 4, False))
 
+        lost = row.get("_lost_ch")
+        if lost and "channels" in on:
+            found.append(("channels", "Modem lost channels",
+                          "Only part of the bonded channels are locked: %s missing (compared with the last 24 h). "
+                          "Speeds drop and the connection is less stable until they come back." % " and ".join(lost), 4, False))
+        elif A.get("ch_alerted") and not lost and "channels" in on:
+            found.append(("channels", "Modem channels back", "All bonded channels are locked again.", 2, True))
+        A["ch_alerted"] = bool(lost) and "channels" in on
+
         usm = row.get("us_power_max")
         if usm not in ("", None) and usm > fnum(cfg, "us_power_max") and "us_power" in on:
             found.append(("us_power", "Upstream power too high",
                           "Upstream transmit power is %s dBmV (limit %g). The modem is straining to reach the "
                           "node; T3 timeouts usually follow." % (usm, fnum(cfg, "us_power_max")), 4, False))
+
+    drops = row.get("hr_drops") or 0
+    if drops >= max(1, fnum(cfg, "alert_dropouts")) and "dropouts" in on:
+        found.append(("dropouts", "Short connection dropouts",
+                      "%d short dropouts in the last %d minutes (longest %d s, %s%% of 1-second pings lost)." %
+                      (drops, round(int(fnum(cfg, "interval")) / 60), row.get("hr_longest") or 0, row.get("hr_loss")), 4, False))
 
     loss = row.get("ping_loss")
     if loss not in ("", None) and loss >= fnum(cfg, "alert_loss") and row.get("ok") == 1 and "loss" in on:
@@ -2757,6 +2821,14 @@ def write_metrics(cfg, st, row, ds, us):
     if row.get("gw_loss") not in ("", None):
         m("gateway_loss_percent", "Packet loss to the ISP gateway (first hop)", "gauge", [({}, row.get("gw_loss"))])
         m("gateway_rtt_ms", "Average ping to the ISP gateway", "gauge", [({}, row.get("gw_avg_ms"))])
+    if row.get("hr_sent"):
+        m("probe_loss_percent", "Loss of 1-second pings in the last sample interval", "gauge", [({}, row.get("hr_loss"))])
+        m("probe_jitter_ms", "Jitter of 1-second pings", "gauge", [({}, row.get("hr_jitter"))])
+        m("probe_p95_ms", "95th percentile latency of 1-second pings", "gauge", [({}, row.get("hr_p95"))])
+        m("probe_dropouts", "Short dropouts in the last sample interval", "gauge", [({}, row.get("hr_drops"))])
+        tot = st.setdefault("drops_total", 0) + int(row.get("hr_drops") or 0)
+        st["drops_total"] = tot
+        m("probe_dropouts_total", "Short dropouts since monitoring began", "counter", [({}, tot)])
     if row.get("temp") not in ("", None):
         m("outdoor_temperature", "Outdoor temperature (Open-Meteo)", "gauge", [({}, row.get("temp"))])
     text = "\n".join(L) + "\n"
@@ -2786,6 +2858,9 @@ HA_SENSORS = [
     ("gw_loss", "ISP gateway packet loss", "%", None, "mdi:lan-disconnect"),
     ("gw_avg_ms", "ISP gateway ping", "ms", "duration", None),
     ("t3_today", "T3 timeouts today", None, None, "mdi:timer-alert"),
+    ("hr_jitter", "Jitter", "ms", "duration", None),
+    ("hr_drops", "Short dropouts (last sample)", None, None, "mdi:connection"),
+    ("ds_locked", "Downstream channels locked", None, None, "mdi:numeric"),
     ("t4_today", "T4 timeouts today", None, None, "mdi:timer-alert"),
 ]
 
@@ -2848,6 +2923,241 @@ def mqtt_update(cfg, st, row, today):
         if ok:
             st["mqtt_disc"] = VERSION + base
     mqtt_publish(cfg, base + "/state", json.dumps(state), retain=True)
+
+# --------------------------------------------------------------------------
+# 1-second latency probe (jitter, short dropouts) - runs inside the daemon
+# --------------------------------------------------------------------------
+
+class Prober:
+    """Sends one ICMP echo per second to a target in a background thread and
+    keeps (wall_time, rtt_ms or None) per probe. A probe without a reply within
+    2 seconds counts as lost. Uses a raw socket (root), else an unprivileged
+    ICMP datagram socket."""
+
+    def __init__(self, target):
+        import threading
+        self.target = target
+        self.lock = threading.Lock()
+        self.records = []
+        self.stop = False
+        self.error = ""
+        self.thread = threading.Thread(target=self._run, name="mm-probe", daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    @staticmethod
+    def _csum(b):
+        if len(b) % 2:
+            b += b"\0"
+        s = sum((b[i] << 8) + b[i + 1] for i in range(0, len(b), 2))
+        s = (s >> 16) + (s & 0xFFFF)
+        s += s >> 16
+        return (~s) & 0xFFFF
+
+    def _packet(self, ident, seq):
+        import struct
+        payload = b"modem-monitor-probe-" + struct.pack("!d", time.time())
+        hdr = struct.pack("!BBHHH", 8, 0, 0, ident, seq)
+        c = self._csum(hdr + payload)
+        return struct.pack("!BBHHH", 8, 0, c, ident, seq) + payload
+
+    def _run(self):
+        import select, socket, struct
+        try:
+            addr = socket.gethostbyname(self.target)
+        except OSError as e:
+            self.error = "cannot resolve %s: %s" % (self.target, e)
+            log("latency probe: " + self.error)
+            return
+        raw = True
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+        except OSError:
+            raw = False
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
+            except OSError as e:
+                self.error = "no ICMP socket available (%s)" % e
+                log("latency probe: " + self.error)
+                return
+        ident = os.getpid() & 0xFFFF
+        seq = 0
+        pending = {}
+        nxt = time.monotonic()
+        log("latency probe: 1 ping/s to %s" % addr)
+        while not self.stop:
+            now = time.monotonic()
+            if now >= nxt:
+                try:
+                    sock.sendto(self._packet(ident, seq), (addr, 0))
+                except OSError:
+                    pass  # counted as lost when it times out
+                pending[seq] = (now, time.time())
+                seq = (seq + 1) & 0xFFFF
+                nxt += 1.0
+                if nxt < now - 5:  # we were suspended; don't burst to catch up
+                    nxt = now + 1.0
+            try:
+                r, _, _ = select.select([sock], [], [], max(0.0, min(0.5, nxt - time.monotonic())))
+            except (OSError, ValueError):
+                r = []
+            if r:
+                try:
+                    data, src = sock.recvfrom(2048)
+                except OSError:
+                    data = b""
+                off = (data[0] & 0x0F) * 4 if raw and data else 0
+                if len(data) >= off + 8 and data[off] == 0 and src[0] == addr:
+                    _t, _c, _ck, rid, rseq = struct.unpack("!BBHHH", data[off:off + 8])
+                    if (not raw or rid == ident) and rseq in pending:
+                        t0, wall = pending.pop(rseq)
+                        with self.lock:
+                            self.records.append((wall, round((time.monotonic() - t0) * 1000, 2)))
+            cutoff = time.monotonic() - 2.0
+            for s in [s for s, (t0, _w) in pending.items() if t0 < cutoff]:
+                _t0, wall = pending.pop(s)
+                with self.lock:
+                    self.records.append((wall, None))
+            with self.lock:
+                if len(self.records) > 7200:
+                    del self.records[:len(self.records) - 7200]
+
+    def take(self):
+        with self.lock:
+            recs = sorted(self.records)
+            self.records = []
+        return recs
+
+
+def probe_stats(recs, drop_min=2):
+    """Summary of one window of 1-second probes."""
+    if not recs:
+        return {}
+    rt = [r for _, r in recs if r is not None]
+    n, lost = len(recs), sum(1 for _, r in recs if r is None)
+    out = {"hr_sent": n, "hr_loss": round(lost * 100.0 / n, 2)}
+    if rt:
+        s = sorted(rt)
+        out["hr_avg"] = round(sum(rt) / len(rt), 2)
+        out["hr_p95"] = round(s[min(len(s) - 1, int(len(s) * 0.95))], 2)
+        out["hr_max"] = round(s[-1], 2)
+        seq = [r for _, r in recs]
+        d = [abs(b - a) for a, b in zip(seq, seq[1:]) if a is not None and b is not None]
+        out["hr_jitter"] = round(sum(d) / len(d), 2) if d else 0.0
+    drops, run, longest = 0, 0, 0
+    for _, r in recs + [(0, 0.0)]:
+        if r is None:
+            run += 1
+        else:
+            if run >= drop_min:
+                drops += 1
+                longest = max(longest, run)
+            run = 0
+    out["hr_drops"], out["hr_longest"] = drops, longest
+    return out
+
+
+PROBER = None
+
+
+def probe_target(cfg):
+    t = (cfg.get("hires_target") or "gateway").strip()
+    if t in ("", "gateway"):
+        return isp_gateway(cfg) or (cfg.get("ping_targets") or "1.1.1.1").split()[0]
+    return t
+
+
+# --------------------------------------------------------------------------
+# Channel watch: channels the modem had locked but lost (partial service)
+# --------------------------------------------------------------------------
+
+def channel_watch(cfg, st, row, now):
+    """Baseline = most channels locked at once in the last 24 h. Fewer now means
+    the modem is running on part of its channels (slower, less reliable)."""
+    if cfg.get("channel_watch", "1") != "1" or row.get("ok") != 1:
+        return None
+    seen = [x for x in st.get("ch_seen", []) if x[0] >= now - 86400]
+    dsl, usl = int(row.get("ds_locked") or 0), int(row.get("us_locked") or 0)
+    base_ds = max([x[1] for x in seen] + [0])
+    base_us = max([x[2] for x in seen] + [0])
+    seen.append([int(now), dsl, usl])
+    st["ch_seen"] = seen[-400:]
+    row["ds_base"], row["us_base"] = base_ds or dsl, base_us or usl
+    lost = []
+    if base_ds and dsl < base_ds:
+        lost.append("%d of %d downstream" % (base_ds - dsl, base_ds))
+    if base_us and usl < base_us:
+        lost.append("%d of %d upstream" % (base_us - usl, base_us))
+    return lost
+
+
+# --------------------------------------------------------------------------
+# Daily digest
+# --------------------------------------------------------------------------
+
+def day_digest(cfg, day=None):
+    """One-paragraph summary of a day (default yesterday) for a notification."""
+    if not day:
+        day = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+    lo = _day_ts(day)
+    hi = _bstart(lo + 86400 + 7200, 86400)
+    summ = [r for r in mark_reboots(read_csvs(files_since(cfg, "summary", lo - 3600), lo - 3600)) if lo <= int(r["ts"]) < hi]
+    ev = [e for e in read_csvs([os.path.join(cfg["data_dir"], "events.csv")], lo) if int(e["ts"]) < hi]
+    if not summ:
+        return day, "No samples were recorded (monitor or router was off)."
+    c = lambda t: sum(1 for e in ev if e["type"] == t)
+    okr = [r for r in summ if r.get("ok") == "1"]
+    rng = lambda k1, k2: (lambda a, b: "%g..%g" % (min(a), max(b)) if a and b else "?")(
+        [fv(r, k1) for r in okr if fv(r, k1) is not None], [fv(r, k2) for r in okr if fv(r, k2) is not None])
+    unc = sum(int(fv(r, "uncorr_delta") or 0) for r in okr)
+    down = sum(1 for r in summ if modem_down(r))
+    reb = sum(1 for r in summ if r["_reb"])
+    rel = sum(1 for r in summ if r["_rel"])
+    loss = sum(1 for r in summ if (fv(r, "ping_loss") or 0) > 0)
+    drops = sum(int(fv(r, "hr_drops") or 0) for r in summ)
+    longest = max([int(fv(r, "hr_longest") or 0) for r in summ] + [0])
+    lostch = sum(1 for r in summ if fv(r, "ds_base") and (fv(r, "ds_locked") or 0) < fv(r, "ds_base"))
+    t3, t4 = c("T3"), c("T4")
+    bad = t3 or t4 or reb or rel or down or unc >= 1000 or drops or lostch
+    parts = ["T3 %d, T4 %d" % (t3, t4), "uncorrectables %s" % "{:,}".format(unc),
+             "downstream %s dBmV" % rng("ds_power_min", "ds_power_max"),
+             "upstream %s dBmV" % rng("us_power_min", "us_power_max")]
+    if reb or rel:
+        parts.append("%d reboot%s, %d re-registration%s" % (reb, "" if reb == 1 else "s", rel, "" if rel == 1 else "s"))
+    parts.append("unreachable in %d sample%s" % (down, "" if down == 1 else "s") if down else "no outages")
+    if loss:
+        parts.append("packet loss in %d sample%s" % (loss, "" if loss == 1 else "s"))
+    if any(fv(r, "hr_sent") for r in summ):
+        parts.append("%d short dropout%s%s" % (drops, "" if drops == 1 else "s", " (longest %d s)" % longest if drops else ""))
+    if lostch:
+        parts.append("channels missing in %d sample%s" % (lostch, "" if lostch == 1 else "s"))
+    try:
+        ch, info = channel_uncorr(cfg, {"d": (lo, 86400)}, hi=hi)
+        f = ingress_findings(ch["d"], info)
+        if f and f[0]["kind"] == "narrow":
+            parts.append("errors concentrated on %g-%g MHz (likely ingress)" % (f[0]["fmin"], f[0]["fmax"]))
+    except Exception:
+        pass
+    return day, ("Problems: " if bad else "Clean day: ") + "; ".join(parts) + "."
+
+
+def digest_due(cfg, st, now):
+    if cfg.get("daily_digest", "0") != "1" or not alert_targets(cfg):
+        return
+    lt = time.localtime(now)
+    today = time.strftime("%Y-%m-%d", lt)
+    if st.get("digest_day") == today or lt.tm_hour < int(fnum(cfg, "digest_hour")):
+        return
+    day, text = day_digest(cfg)
+    res = send_alert(cfg, "Modem report for %s" % time.strftime("%a %b %d", time.strptime(day, "%Y-%m-%d")), text, 2, "digest")
+    if any(ok for _, ok, _ in res):
+        st["digest_day"] = today
+        log("daily digest sent")
+    if (cfg.get("mqtt_host") or "").strip():
+        mqtt_publish(cfg, (cfg.get("mqtt_topic") or "modem_monitor").strip("/") + "/digest",
+                     json.dumps({"day": day, "text": text}), retain=True)
 
 # --------------------------------------------------------------------------
 # Printable complaint summary for a date range
@@ -3039,6 +3349,12 @@ def complaint_summary(cfg, d_from, d_to, exclude_work=True):
                 "gw_on": any(fv(r, "gw_loss") is not None for r in summ),
                 "both_loss": sum(1 for r in summ if (fv(r, "gw_loss") or 0) > 0 and (fv(r, "ping_loss") or 0) > 0),
                 "traces": len(read_traces(cfg, lo, 1000)),
+                "hires_on": any(fv(r, "hr_sent") for r in summ),
+                "drops": int(sum(fv(r, "hr_drops") or 0 for r in summ)),
+                "drop_days": len({r["time"][:10] for r in summ if (fv(r, "hr_drops") or 0) > 0}),
+                "longest": int(max([fv(r, "hr_longest") or 0 for r in summ] + [0])),
+                "lostch": sum(1 for r in summ if fv(r, "ds_base") is not None and r.get("ok") == "1" and
+                              ((fv(r, "ds_locked") or 0) < fv(r, "ds_base") or (fv(r, "us_locked") or 0) < (fv(r, "us_base") or 0))),
                 "loss_avg": round(sum(pings) / len(pings), 2) if pings else None,
                 "worst_day": worst["day"] if worst and worst["uncorr"] else None,
                 "worst_unc": worst["uncorr"] if worst else 0},
@@ -3113,6 +3429,8 @@ if(NI.length)F.push("On <b>"+pl(NI.length,"day")+"</b> the errors were concentra
 if(T.us_peak!=null&&T.us_peak>L.us_power_max)F.push("Upstream transmit power reached <b>"+T.us_peak+" dBmV</b>, above the "+L.us_power_max+" dBmV guideline, on "+pl(T.us_over_days,"day")+": the modem had to transmit at or near its maximum to be heard, which suggests loss in the line or tap.");
 {const u=Math.max(0,T.reboots-T.router_reboots),P=[];if(u)P.push("rebooted "+pl(u,"time")+" on its own");if(T.relocks)P.push("lost signal and re-registered "+pl(T.relocks,"time")+" without rebooting");if(P.length)F.push("The modem "+P.join(" and ")+"."+(T.router_reboots?" ("+pl(T.router_reboots,"planned reboot")+" listed below "+(T.router_reboots===1?"is":"are")+" not included.)":""))}
 if(T.gw_on&&T.loss_polls){if(T.both_loss>=Math.max(1,T.loss_polls/2))F.push("In "+pl(T.both_loss,"sample")+" with packet loss, pings to "+esc(isp)+"\u2019s own gateway (the first hop past the modem) failed too, so the loss starts on the local cable segment, not further out on the internet."+(T.traces?" "+pl(T.traces,"traceroute was","traceroutes were")+" saved during the loss.":""));else if(T.traces)F.push(pl(T.traces,"traceroute was","traceroutes were")+" saved during packet loss.")}
+if(T.hires_on&&T.drops)F.push("One ping per second to "+esc(isp)+"\u2019s gateway recorded <b>"+pl(T.drops,"short dropout")+"</b> (2 or more seconds with no reply, longest "+T.longest+" s) on "+pl(T.drop_days,"day")+". Interruptions this short are missed by ordinary checks but freeze calls, video and online games.");
+if(T.lostch)F.push("In "+pl(T.lostch,"sample")+" the modem was running on only part of its bonded channels (channels it normally holds had dropped), which lowers speed and reliability.");
 (D.weather||[]).forEach(w=>F.push(esc(w)));
 if(T.outages)F.push(pl(T.outages,"outage")+" (modem unreachable or no internet), about "+f(T.down_min)+" minutes in total.");
 if(T.link_on)F.push(T.link_err?"The router recorded "+f(T.link_err)+" Ethernet errors on its connection to the modem.":"The router’s Ethernet connection to the modem recorded <b>no errors</b>, which rules out the home router and the router–modem cable.");
@@ -3634,12 +3952,23 @@ def daemon(cfg):
     last_rep = 0
     last_prune = 0
     last_upd = time.time() - 6 * 3600 + 600  # first check ~10 min after start
+    global PROBER
+    if cfg.get("hires_ping", "0") == "1":
+        PROBER = Prober(probe_target(cfg)).start()
     while True:
         t0 = time.time()
         try:
             poll(cfg)
         except Exception as e:  # never die; procd would respawn anyway
             log("poll error: %r" % e)
+        try:
+            st = load_state(cfg)
+            before = st.get("digest_day")
+            digest_due(cfg, st, time.time())
+            if st.get("digest_day") != before:
+                save_state(cfg, st)
+        except Exception as e:
+            log("digest error: %r" % e)
         if time.time() - last_rep >= rep_every:
             try:
                 build_report(cfg)
@@ -3738,6 +4067,13 @@ def main():
         print(p)
     elif cmd == "test":
         sys.exit(test(cfg, "--raw" in args))
+    elif cmd == "digest":
+        pos, kv, bools = _opts(args[1:], ("--day",))
+        day, text = day_digest(cfg, kv.get("day"))
+        print("%s: %s" % (day, text))
+        if "send" in bools:
+            for c, ok, d in send_alert(cfg, "Modem report for %s" % day, text, 2, "digest"):
+                print("%-9s %s  %s" % (c, "OK  " if ok else "FAIL", d))
     elif cmd == "compress":
         print("compressed %d file(s)" % compress_old(dict(cfg, compress_old="1")))
     elif cmd in ("version", "--version"):
