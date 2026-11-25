@@ -1,0 +1,345 @@
+zabbix_export:
+  version: '6.0'
+  groups:
+    - uuid: 44699522389547e69657dbbc34f5a159
+      name: Templates/Network devices
+  templates:
+    - uuid: 189b7e656a4f4832bb28a5ccdcd2e794
+      template: 'Modem Monitor by HTTP'
+      name: 'Modem Monitor by HTTP'
+      description: 'Cable modem signal and line quality from luci-app-modem-monitor on OpenWrt (https://github.com/RyanBlakeIT/luci-app-modem-monitor). Reads http://<router>/modem-monitor/latest.json.'
+      groups:
+        - name: Templates/Network devices
+      items:
+        - uuid: ff11d4b290134db7836bab52b20a5604
+          name: 'Modem monitor: latest sample'
+          type: HTTP_AGENT
+          key: mm.latest
+          delay: '{$MM.INTERVAL}'
+          history: '0'
+          trends: '0'
+          value_type: TEXT
+          url: '{$MM.URL}'
+          tags:
+            - tag: component
+              value: raw
+        - uuid: f5c339b7d57e41b78c791b8f458da21d
+          name: 'Modem reachable'
+          type: DEPENDENT
+          key: mm.ok
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ok'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+          triggers:
+            - uuid: 875475cddd06452d8af49148eb8d9698
+              expression: 'max(/Modem Monitor by HTTP/mm.ok,#2)=0'
+              name: 'Cable modem unreachable'
+              priority: HIGH
+        - uuid: 141376b199dd4242baecc6642eab392c
+          name: 'Downstream power, lowest channel'
+          type: DEPENDENT
+          key: mm.ds_power_min
+          delay: '0'
+          value_type: FLOAT
+          units: 'dBmV'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ds_power_min'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+        - uuid: 6c4756a976af4994a493a65668fd6ea3
+          name: 'Downstream power, highest channel'
+          type: DEPENDENT
+          key: mm.ds_power_max
+          delay: '0'
+          value_type: FLOAT
+          units: 'dBmV'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ds_power_max'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+        - uuid: b31c15cdb5fe4560ade18b2b5b85023a
+          name: 'Downstream SNR, lowest channel'
+          type: DEPENDENT
+          key: mm.ds_snr_min
+          delay: '0'
+          value_type: FLOAT
+          units: 'dB'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ds_snr_min'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+          triggers:
+            - uuid: 4316b416a0894a53a3fc8a6619e4bda4
+              expression: 'max(/Modem Monitor by HTTP/mm.ds_snr_min,15m)<{$MM.SNR.MIN}'
+              name: 'Downstream SNR below {$MM.SNR.MIN} dB'
+              priority: AVERAGE
+        - uuid: cd61a32700da49e9af1e424c469af402
+          name: 'Upstream power, highest channel'
+          type: DEPENDENT
+          key: mm.us_power_max
+          delay: '0'
+          value_type: FLOAT
+          units: 'dBmV'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.us_power_max'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+          triggers:
+            - uuid: e7d7f6ea4087445ab7aaa66952d1278e
+              expression: 'min(/Modem Monitor by HTTP/mm.us_power_max,15m)>{$MM.US.MAX}'
+              name: 'Upstream power above {$MM.US.MAX} dBmV'
+              priority: AVERAGE
+        - uuid: a36e7d2b70104c31bb8b16394eda4aec
+          name: 'Uncorrectable codewords per sample'
+          type: DEPENDENT
+          key: mm.uncorr_delta
+          delay: '0'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.uncorr_delta'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+          triggers:
+            - uuid: 1cb8f7f4134c402ebb76baa7d1921a5a
+              expression: 'last(/Modem Monitor by HTTP/mm.uncorr_delta)>{$MM.UNCORR.MAX}'
+              name: 'Uncorrectable codewords spiking'
+              priority: WARNING
+        - uuid: 97623bb948ae4a3d9bb7365cae0a36a9
+          name: 'Modem uptime'
+          type: DEPENDENT
+          key: mm.uptime
+          delay: '0'
+          units: 's'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.uptime_s'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+          triggers:
+            - uuid: 48adfd8937c54a1ba46531e2e36374c0
+              expression: 'last(/Modem Monitor by HTTP/mm.uptime)<600'
+              name: 'Cable modem rebooted'
+              priority: WARNING
+        - uuid: a3f27e231ad74e63bec1e28935d66d8b
+          name: 'Internet packet loss'
+          type: DEPENDENT
+          key: mm.ping_loss
+          delay: '0'
+          value_type: FLOAT
+          units: '%'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ping_loss'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+        - uuid: 7bfba4583b0843ee9c7267ae0d29f0b0
+          name: 'Internet ping'
+          type: DEPENDENT
+          key: mm.ping_avg
+          delay: '0'
+          value_type: FLOAT
+          units: 'ms'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ping_avg_ms'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+        - uuid: 105c8201ab6940e1af9792325a3cdd74
+          name: 'ISP gateway packet loss'
+          type: DEPENDENT
+          key: mm.gw_loss
+          delay: '0'
+          value_type: FLOAT
+          units: '%'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.gw_loss'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+          triggers:
+            - uuid: 8bfdd0ea0bd2457aab55083f31848c94
+              expression: 'min(/Modem Monitor by HTTP/mm.gw_loss,15m)>{$MM.LOSS.MAX}'
+              name: 'Packet loss to the ISP gateway'
+              priority: AVERAGE
+        - uuid: c848802a4cb442eaab8373ea38af7dcb
+          name: 'ISP gateway ping'
+          type: DEPENDENT
+          key: mm.gw_avg
+          delay: '0'
+          value_type: FLOAT
+          units: 'ms'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.gw_avg_ms'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+        - uuid: 9d19e93e915442efa08366f98cc5b649
+          name: 'Outdoor temperature'
+          type: DEPENDENT
+          key: mm.temp
+          delay: '0'
+          value_type: FLOAT
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.temp'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+        - uuid: 97bcc5f7948a40119b74e6d35b02c3e6
+          name: 'Last sample time'
+          type: DEPENDENT
+          key: mm.sample_ts
+          delay: '0'
+          units: 'unixtime'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ts'
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: mm.latest
+          tags:
+            - tag: component
+              value: cable-modem
+          triggers:
+            - uuid: cc4de32ad0d14df0b69ea145511ba0b2
+              expression: 'now()-last(/Modem Monitor by HTTP/mm.sample_ts)>1800'
+              name: 'modem-monitor stopped sampling'
+              priority: WARNING
+      macros:
+        - macro: '{$MM.URL}'
+          value: 'http://{HOST.CONN}/modem-monitor/latest.json'
+          description: 'Router URL of latest.json'
+        - macro: '{$MM.INTERVAL}'
+          value: '5m'
+          description: 'Match the sample interval of modem-monitor'
+        - macro: '{$MM.US.MAX}'
+          value: '51'
+          description: 'Upstream power limit (dBmV)'
+        - macro: '{$MM.SNR.MIN}'
+          value: '33'
+          description: 'Downstream SNR minimum (dB)'
+        - macro: '{$MM.UNCORR.MAX}'
+          value: '5000'
+          description: 'Uncorrectables per sample'
+        - macro: '{$MM.LOSS.MAX}'
+          value: '10'
+          description: 'Gateway packet loss (%)'

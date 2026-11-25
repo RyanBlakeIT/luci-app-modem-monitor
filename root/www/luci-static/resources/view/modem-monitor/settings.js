@@ -154,6 +154,61 @@ return view.extend({
 		o = s.option(form.Value, 'ping_targets', _('Ping targets'), _('Space-separated.'));
 		o.placeholder = '1.1.1.1 8.8.8.8';
 
+		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Network path & weather'));
+
+		o = s.option(form.Flag, 'gw_ping', _('Ping the ISP gateway'),
+			_('Also pings the first hop past the modem (the WAN default gateway). If it loses packets too, the problem is on the local cable segment rather than further out on the internet.'));
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'gw_target', _('Gateway address'), _('Leave empty to use the WAN default gateway.'));
+		o.datatype = 'host';
+		o.placeholder = _('auto');
+		o.depends('gw_ping', '1');
+
+		o = s.option(form.Flag, 'trace_on_loss', _('Traceroute during packet loss'),
+			_('Saves a traceroute to the first ping target when packets are lost (at most every 15 minutes). Shown on the report.'));
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'weather_lat', _('Weather: latitude'),
+			_('Optional. Records outdoor temperature and precipitation from <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> (free, no account) so the report can show whether levels or errors follow the weather. Two decimals (about 1 km) is plenty. Find yours by right-clicking a spot in Google Maps.'));
+		o.datatype = 'range(-90,90)';
+		o.placeholder = '37.08';
+
+		o = s.option(form.Value, 'weather_lon', _('Weather: longitude'));
+		o.datatype = 'range(-180,180)';
+		o.placeholder = '-76.47';
+
+		o = s.option(form.ListValue, 'weather_unit', _('Temperature unit'));
+		o.value('C', '°C');
+		o.value('F', '°F');
+		o.default = 'C';
+
+		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Integrations'),
+			_('<b>Prometheus:</b> scrape <code>http://&lt;router&gt;/modem-monitor/metrics.txt</code> (updated every sample). <b>Zabbix:</b> import <code>examples/zabbix/modem_monitor_by_http.yaml</code> from the GitHub repository and link it to the router host; it reads <code>/modem-monitor/latest.json</code>. <b>Home Assistant:</b> fill in MQTT below; sensors appear automatically through MQTT discovery.'));
+
+		o = s.option(form.Value, 'prom_textfile', _('Extra metrics file'),
+			_('Optional: also write the Prometheus metrics to this path, for a node-exporter textfile collector.'));
+		o.placeholder = '/var/prometheus/modem.prom';
+
+		o = s.option(form.Value, 'mqtt_host', _('MQTT broker'),
+			_('Host name or IP. Needs the <code>mosquitto-client-ssl</code> (or <code>-nossl</code>) package. Leave empty to turn MQTT off. Alerts are also published to <em>topic</em>/alert.'));
+		o.datatype = 'host';
+
+		o = s.option(form.Value, 'mqtt_port', _('MQTT port'));
+		o.datatype = 'port';
+		o.placeholder = '1883';
+		o = s.option(form.Value, 'mqtt_user', _('MQTT user'));
+		o = s.option(form.Value, 'mqtt_pass', _('MQTT password'));
+		o.password = true;
+		o = s.option(form.Flag, 'mqtt_tls', _('Use TLS'), _('Usually port 8883; needs mosquitto-client-ssl.'));
+		o = s.option(form.Value, 'mqtt_topic', _('MQTT base topic'));
+		o.placeholder = 'modem_monitor';
+		o = s.option(form.Flag, 'mqtt_discovery', _('Home Assistant discovery'));
+		o.default = '1';
+		o.rmempty = false;
+
 		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Alerts'),
 			_('Get a phone notification when the line misbehaves. Easiest: install the free <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> app, subscribe to a hard-to-guess topic name, and enter that name below. Alerts raised while the internet is down are sent once it is back.'));
 

@@ -22,6 +22,7 @@ jobs:
           for f in root/etc/init.d/modem-monitor root/etc/uci-defaults/* scripts/* build.sh; do sh -n "$f"; done
           for f in root/www/luci-static/resources/view/modem-monitor/*.js; do node --check "$f"; done
           for f in root/usr/share/luci/menu.d/*.json root/usr/share/rpcd/acl.d/*.json; do python3 -m json.tool "$f" >/dev/null; done
+          python3 -c "import yaml; yaml.safe_load(open('examples/zabbix/modem_monitor_by_http.yaml'))"
 
       - name: Smoke test against the mock modem
         run: |
@@ -36,6 +37,7 @@ jobs:
           python3 root/usr/bin/modem-monitor poll
           python3 root/usr/bin/modem-monitor summary
           test -s /tmp/mm-www/summary.html
+          grep -q '^modem_up 1' /tmp/mm-www/metrics.txt
           ! python3 root/usr/bin/modem-monitor alert-test
           python3 root/usr/bin/modem-monitor mark "CI entry" --type other
           python3 root/usr/bin/modem-monitor export

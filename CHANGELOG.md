@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0
+- **ISP gateway ping:** every sample also pings the first hop past the modem (the WAN default gateway). The packet loss and latency charts show the internet and the gateway side by side. The complaint summary notes when the loss starts on the local cable segment.
+- **Traceroute during packet loss:** saved automatically, at most every 15 minutes, to `traces-YYYY-MM.log`. Shown on the report and counted in the complaint summary.
+- **Weather:** optional outdoor temperature and precipitation from Open-Meteo, with a temperature chart. The report and complaint summary note when upstream or downstream power follow temperature (correlation ±0.5 or stronger), or when errors are much higher during rain.
+- **Prometheus:** `metrics.txt` in the web directory: per-channel downstream power, SNR and codeword counters; upstream power; uptime; event log counts by type; ping and gateway loss and latency; temperature. Optional extra copy for a node-exporter textfile collector.
+- **MQTT / Home Assistant:** state published to `<topic>/state` every sample, alerts to `<topic>/alert`, and Home Assistant discovery for 12 sensors and an online binary sensor. Needs `mosquitto-client-ssl` or `-nossl`.
+- **Zabbix:** template `examples/zabbix/modem_monitor_by_http.yaml` (HTTP agent on `latest.json`; triggers for modem unreachable, reboot, upstream power, SNR, uncorrectables, gateway loss and stalled sampling).
+- New Settings sections: **Network path & weather** and **Integrations**.
+
 ## 1.2.2
 - Settings shows the installed version at the top, with the update status (up to date, or a newer version with a link to install it) and when GitHub was last checked. The Updates section moved to the top of the page.
 - Updates are checked every 6 hours instead of once a day, so a new release shows up sooner. **Check now** refreshes the status in place.

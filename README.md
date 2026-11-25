@@ -18,6 +18,9 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 - **Per-channel error heatmap and ingress detection:** uncorrectable errors per downstream channel over time. Days when most errors sit on a few adjacent channels are flagged as likely RF ingress, with the frequency range, which is useful evidence that the problem is in the cable plant.
 - **Alerts:** phone notifications through [ntfy](https://ntfy.sh) (no account needed), Pushover, Telegram, a JSON webhook or email for outages, unexplained reboots, re-registrations, T3/T4 bursts, uncorrectable spikes (with the affected channels), high upstream power and packet loss. Alerts raised while the internet is down are delivered once it is back.
 - **Complaint summary:** a printable one-page summary for any date range, with findings in plain language, day-by-day counts, repairs and calls from the maintenance log, outages and the modem's own timeout messages. Print it or save it as a PDF.
+- **ISP gateway ping and traceroutes:** each sample also pings the first hop past the modem. Loss there too means the problem is on the local cable segment. A traceroute is saved automatically during packet loss.
+- **Weather:** optional outdoor temperature and precipitation from Open-Meteo (free, no account), with a note when upstream power, downstream power or errors follow temperature or rain, which is typical of corroded connectors and water in outdoor cabling.
+- **Integrations:** Prometheus metrics at `/modem-monitor/metrics.txt`, Home Assistant sensors through MQTT discovery (needs `mosquitto-client`), and a Zabbix template in `examples/zabbix/`.
 - **Download all data:** one `.zip` with every CSV, the report and a diagnostics snapshot. MAC addresses and public IP addresses are masked by default.
 - **Updates:** checks GitHub for a newer release every 6 hours and offers to install it from the Signal Report page. The download is verified against GitHub's published SHA-256 checksum, and nothing is installed without your click.
 - **`latest.json`:** the newest sample, for Zabbix or other monitoring.
@@ -73,6 +76,12 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 | `modem_eee`, `modem_led` | `0`, `1` | Fallback EEE/LED values re-sent with a reboot command (read live from the modem first) |
 | `ping_targets`, `ping_count` | `1.1.1.1 8.8.8.8`, `5` | Internet reachability check |
 | `us_power_min/max`, `ds_power_min/max`, `ds_snr_min` | `35/51`, `-7/7`, `33` | Shaded "healthy" bands (common DOCSIS 3.1 guidelines, not ISP specs) |
+| `gw_ping`, `gw_target` | `1`, auto | Ping the ISP gateway (WAN default gateway unless set) |
+| `trace_on_loss` | `1` | Save a traceroute when packets are lost (max every 15 min) |
+| `weather_lat`, `weather_lon`, `weather_unit` | —, —, `C` | Open-Meteo location (empty = off) and `C`/`F` |
+| `prom_textfile` | — | Extra copy of the Prometheus metrics (node-exporter textfile collector) |
+| `mqtt_host`, `mqtt_port`, `mqtt_user`, `mqtt_pass`, `mqtt_tls` | —, `1883`, —, —, `0` | MQTT broker; empty host = off |
+| `mqtt_topic`, `mqtt_discovery`, `mqtt_discovery_prefix` | `modem_monitor`, `1`, `homeassistant` | State on `<topic>/state`, alerts on `<topic>/alert`, Home Assistant discovery |
 | `alert_enabled` | `0` | Send alerts |
 | `alert_on` | all | List of: `outage reboot relock t3t4 uncorr us_power loss` |
 | `alert_ntfy_url`, `alert_ntfy_token` | — | ntfy topic name (uses ntfy.sh) or full URL; token for protected topics |
@@ -111,7 +120,7 @@ Maintenance types: `tech`, `isp-call`, `outage`, `modem-reboot`, `router-change`
 
 ## Data and privacy
 
-- Everything stays on the router. The only outside connections are the pings, a request to the GitHub API every 6 hours for the latest release (if update checks are on), and the alert services you configure. A public ntfy.sh topic can be read by anyone who knows its name, so use a long random one or a protected topic.
+- Everything stays on the router. The only outside connections are the pings, a request to the GitHub API every 6 hours for the latest release (if update checks are on), the alert services you configure, Open-Meteo (if a weather location is set, sending only the coordinates) and your MQTT broker. A public ntfy.sh topic can be read by anyone who knows its name, so use a long random one or a protected topic.
 - The modem password is stored in UCI in plain text, as with other OpenWrt credentials.
 - The report and `latest.json` are served by uhttpd at `http://<router>/modem-monitor/` on your LAN.
 - Exports mask MAC addresses and public IP addresses unless you use `--full`.

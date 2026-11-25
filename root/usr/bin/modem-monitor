@@ -47,7 +47,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.2.2"
+VERSION = "1.3.0"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -97,6 +97,21 @@ DEFAULTS = {
     "alert_loss": "20",         # % packet loss in one sample
     "alert_outage_polls": "2",  # failed samples in a row before "unreachable"
     "alert_cooldown_min": "60", # per alert type
+    "gw_ping": "1",             # also ping the ISP gateway (first hop)
+    "gw_target": "",            # empty = WAN default gateway
+    "trace_on_loss": "1",       # save a traceroute when packets are lost (max every 15 min)
+    "weather_lat": "",          # outdoor weather from Open-Meteo; empty = off
+    "weather_lon": "",
+    "weather_unit": "C",        # C or F
+    "prom_textfile": "",        # optional extra copy of metrics.txt (node-exporter textfile dir)
+    "mqtt_host": "",            # MQTT / Home Assistant; needs mosquitto-client
+    "mqtt_port": "1883",
+    "mqtt_user": "",
+    "mqtt_pass": "",
+    "mqtt_tls": "0",
+    "mqtt_topic": "modem_monitor",
+    "mqtt_discovery": "1",
+    "mqtt_discovery_prefix": "homeassistant",
 }
 
 LOGIN_BACKOFF_S = 1800  # after a failed login, wait 30 min (avoid modem lockout)
@@ -755,7 +770,8 @@ SUMMARY_COLS = ["ts", "time", "ok", "error", "uptime_s", "rebooted", "relock",
                 "ds_count", "ds_locked", "ds_power_min", "ds_power_max", "ds_snr_min", "ds_snr_avg",
                 "corr_total", "uncorr_total", "uncorr_delta",
                 "us_count", "us_locked", "us_power_min", "us_power_max",
-                "ping_loss", "ping_avg_ms", "ping_max_ms", "ds_power_avg", "us_power_avg"]
+                "ping_loss", "ping_avg_ms", "ping_max_ms", "ds_power_avg", "us_power_avg",
+                "gw_loss", "gw_avg_ms", "temp", "precip"]
 CHANNEL_COLS = ["ts", "time", "dir", "ch", "lock", "mod", "freq_mhz", "power", "snr", "corr", "uncorr"]
 EVENT_COLS = ["ts", "time", "modem_date", "modem_time", "prio", "type", "message"]
 
@@ -979,10 +995,29 @@ def poll(cfg):
     row["ping_loss"] = rnd(sum(losses) / len(losses)) if losses else ""
     row["ping_avg_ms"] = rnd(sum(avgs) / len(avgs)) if avgs else ""
     row["ping_max_ms"] = rnd(max(maxs)) if maxs else ""
+    row["gw_loss"] = row["gw_avg_ms"] = ""
+    if cfg.get("gw_ping", "1") == "1":
+        gw = isp_gateway(cfg)
+        if gw:
+            lo, av, mx = ping(gw, int(fnum(cfg, "ping_count")))
+            row["gw_loss"] = rnd(lo) if lo is not None else ""
+            row["gw_avg_ms"] = rnd(av) if av is not None else ""
+            row["gw"] = gw
+    if (row["ping_loss"] or 0) > 0 or (row["gw_loss"] or 0) > 0:
+        start_trace(cfg, st, now, "%s%% loss to the internet, %s%% to the ISP gateway" %
+                    (row["ping_loss"], row["gw_loss"] if row["gw_loss"] != "" else "?"))
+    try:
+        t, pr = weather_now(cfg, st, now)
+    except Exception as e:
+        log("weather error: %r" % e)
+        t, pr = None, None
+    row["temp"] = t if t is not None else ""
+    row["precip"] = pr if pr is not None else ""
 
     modem = S33(cfg, st)
     events_new = []
     chd, chinfo = {}, {}
+    ds, us = [], []
     try:
         resp = modem.call(["GetCustomerStatusDownstreamChannelInfo",
                            "GetCustomerStatusUpstreamChannelInfo",
@@ -1087,6 +1122,8 @@ def poll(cfg):
                 seen_set.add(key)
                 seen.append(key)
                 ets = event_ts(ev, now, boot_ts, clock)
+                cnt = st.setdefault("event_counts", {})
+                cnt[classify(ev["msg"])] = cnt.get(classify(ev["msg"]), 0) + 1
                 events_new.append({"ts": ets, "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ets)),
                                    "modem_date": ev["date"], "modem_time": ev["time"], "prio": ev["prio"],
                                    "type": classify(ev["msg"]), "message": ev["msg"]})
@@ -1114,6 +1151,23 @@ def poll(cfg):
         alert_check(cfg, st, row, events_new, chd, chinfo, now)
     except Exception as e:
         log("alert error: %r" % e)
+
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    td = st.get("today") or {}
+    if td.get("day") != day:
+        td = {"day": day}
+    for e in events_new:
+        if e["time"][:10] == day:
+            td[e["type"]] = td.get(e["type"], 0) + 1
+    st["today"] = td
+    try:
+        write_metrics(cfg, st, row, ds, us)
+    except Exception as e:
+        log("metrics error: %r" % e)
+    try:
+        mqtt_update(cfg, st, row, td)
+    except Exception as e:
+        log("mqtt error: %r" % e)
 
     append_csv(month_file(cfg, "summary", now), SUMMARY_COLS, [row])
     if events_new:
@@ -1254,8 +1308,11 @@ def build_report(cfg):
             "ds_power": [{"name": "Highest channel", "pts": bucketize([(int(r["ts"]), fv(r, "ds_power_max")) for r in s], b, "max")},
                          {"name": "Lowest channel", "pts": bucketize([(int(r["ts"]), fv(r, "ds_power_min")) for r in s], b, "min")}],
             "uncorr": [{"name": "Uncorrectable codewords", "pts": bucketize([(int(r["ts"]), fv(r, "uncorr_delta")) for r in s], b, "sum")}],
-            "loss": [{"name": "Packet loss %", "pts": bucketize([(int(r["ts"]), fv(r, "ping_loss")) for r in s], b, "max")}],
-            "latency": [{"name": "Average ping", "pts": bucketize([(int(r["ts"]), fv(r, "ping_avg_ms")) for r in s], b, "avg")}],
+            "loss": [{"name": "Internet", "pts": bucketize([(int(r["ts"]), fv(r, "ping_loss")) for r in s], b, "max")},
+                     {"name": "ISP gateway (first hop)", "pts": bucketize([(int(r["ts"]), fv(r, "gw_loss")) for r in s], b, "max")}],
+            "latency": [{"name": "Internet", "pts": bucketize([(int(r["ts"]), fv(r, "ping_avg_ms")) for r in s], b, "avg")},
+                        {"name": "ISP gateway (first hop)", "pts": bucketize([(int(r["ts"]), fv(r, "gw_avg_ms")) for r in s], b, "avg")}],
+            "temp": [{"name": "Outdoor temperature", "pts": bucketize([(int(r["ts"]), fv(r, "temp")) for r in s], max(b, 1800), "avg")}],
             "link_err": [{"name": "Link errors", "pts": bucketize([(int(r["ts"]), r["_err"]) for r in lk], b, "sum")}],
             "missed": [{"name": "Missed packets", "pts": bucketize([(int(r["ts"]), r["_missed"]) for r in lk], b, "sum")}],
         }
@@ -1342,6 +1399,11 @@ def build_report(cfg):
                   for r in links]
     data["link_info"] = {"dev": links[-1].get("dev", ""), "speed": links[-1].get("speed", "")} if links else {}
     data["isp"] = cfg.get("isp_name", "").strip()
+    unit = "\u00b0F" if (cfg.get("weather_unit") or "C").upper().startswith("F") else "\u00b0C"
+    data["temp_unit"] = unit
+    data["weather_on"] = bool((cfg.get("weather_lat") or "").strip()) or any(fv(r, "temp") is not None for r in summ)
+    data["weather_notes"] = weather_text(weather_effects(summ), unit) if data["weather_on"] else []
+    data["traces"] = read_traces(cfg, now - 30 * 86400)
     data["title"] = cfg.get("report_title", "").strip()
     data["note"] = cfg.get("report_note", "").strip()
     data.pop("days", None)  # the page builds the daily table itself (see "samples")
@@ -1525,6 +1587,7 @@ details summary{cursor:pointer;color:var(--text-secondary);font-size:13px;margin
 <div class="card section"><h2>Maintenance log</h2><div class="sub">Repairs, calls, reboots and router changes, numbered to match the dashed markers on the charts. "Before" and "after" are the 24 hours on each side (median power range, uncorrectables per day, T3/T4 timeouts, upstream power warnings). Add or edit entries on the router's <b>Maintenance Log</b> tab or with <code>modem-monitor mark</code>.</div><div class="scroll"><table id="maint"></table></div></div>
 <div class="card section"><h2 id="daysTitle">Daily summary (last 30 days)</h2><div class="sub">Counts from the modem event log and from this router's polls. Rows with trouble are marked.</div><div class="scroll"><table id="days"></table></div></div>
 <div class="card section"><h2>Incidents</h2><div class="sub">Times the modem couldn't be reached, pings failed completely, or the modem rebooted.</div><div class="scroll"><table id="inc"></table></div></div>
+<div class="card section" id="traceCard" style="display:none"><h2>Traceroutes during packet loss</h2><div class="sub">Saved automatically when pings lose packets (at most every 15 minutes). The first hops after this router belong to the ISP; where the stars or high times begin shows where the loss starts.</div><div id="traces"></div></div>
 <div class="card section"><h2>Modem event log</h2><div class="sub">New log entries collected since monitoring began. Login entries from this monitor are hidden.</div><div class="scroll"><table id="ev"></table></div></div>
 <div class="card section"><h2>Raw data (CSV)</h2><div class="sub">Download these and attach them to a complaint or ticket. To get everything in one file, use <b>Download all data</b> on the router's Cable Modem page, or run <code>modem-monitor export</code>.</div><div id="files"></div></div>
 </div>
@@ -1552,10 +1615,11 @@ const CH=[
  {id:"ds_snr",title:"Downstream SNR",unit:"dB",band:[T.ds_snr_min,null],note:"SC-QAM channels. Dips below the line indicate noise on the line.",how:"min"},
  {id:"ds_power",title:"Downstream receive power",unit:"dBmV",band:[T.ds_power_min,T.ds_power_max],note:"Highest and lowest channel.",how:""},
  {id:"uncorr",title:"Uncorrectable codewords",unit:"per interval",bars:true,note:"Data the modem received too damaged to repair. Spikes line up with noise or ingress."},
- {id:"loss",title:"Packet loss",unit:"%",bars:true,note:"Pings from this router to the internet."},
- {id:"latency",title:"Ping latency",unit:"ms",note:"Average round-trip time."},
+ {id:"loss",title:"Packet loss",unit:"%",bars:true,note:"Pings from this router to the internet and to "+(D.isp||"the ISP")+"\u2019s gateway (the first hop past the modem). Loss to the gateway too means the problem is on the local cable segment; loss only further out is beyond it."},
+ {id:"latency",title:"Ping latency",unit:"ms",note:"Average round-trip time to the internet and to the ISP gateway."},
  {id:"link_err",title:"Router\u2013modem Ethernet errors",unit:"per interval",bars:true,note:"CRC, alignment and collision counters on the router's WAN port. Should stay at zero; errors here point to the router\u2013modem cable or ports, not "+(D.isp||"your ISP")+"."},
  {id:"missed",title:"Router NIC missed packets",unit:"per interval",bars:true,note:"Packets the router's WAN port dropped because its receive buffer filled (router CPU/IRQ load). A router tuning issue, not a line or cable fault."}];
+if(D.weather_on)CH.push({id:"temp",title:"Outdoor temperature",unit:D.temp_unit,note:(D.weather_notes&&D.weather_notes.length?D.weather_notes.join(" "):"From Open-Meteo for the configured location. Compare with upstream power and errors: faults in outdoor cabling often change with temperature or rain.")});
 const fmtT=(t,span)=>{const d=new Date(t*1000);return span<=86400*1.2?d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):span<=86400*4?d.toLocaleDateString([], {month:"short",day:"numeric"})+" "+d.toLocaleTimeString([], {hour:"numeric"}):d.toLocaleDateString([], {month:"short",day:"numeric"})};
 const fmtFull=t=>new Date(t*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
 function nice(lo,hi,n){if(lo===hi){lo-=1;hi+=1}const s=Math.pow(10,Math.floor(Math.log10((hi-lo)/n)));const st=[1,2,2.5,5,10].map(m=>m*s).find(x=>(hi-lo)/x<=n)||s*10;const a=Math.floor(lo/st)*st,b=Math.ceil(hi/st)*st,t=[];for(let v=a;v<=b+st/2;v+=st)t.push(+v.toFixed(6));return t}
@@ -1584,7 +1648,7 @@ function chart(c,rg){
   g+="<line x1="+G.x.toFixed(1)+" x2="+G.x.toFixed(1)+" y1="+Tp+" y2="+(H-B)+" stroke='var(--text-secondary)' stroke-opacity='"+op+"' stroke-dasharray='3 3'/><text x="+(right?G.x-3:G.x+3).toFixed(1)+" y="+(Tp+10)+" font-size='10' text-anchor='"+(right?"end":"start")+"' fill='var(--text-secondary)' fill-opacity='"+op+"'>"+lab+"</text>"});
  const step=rg.bucket||D.interval,gap=step*3;
  ser.forEach(s=>{const col="var(--s"+s.ci+")";
-  if(c.bars){const bw=Math.max(1,(W-L-Rr)*step/(x1-x0)-1);s.pts.forEach(p=>{if(p[1]>0){const y=Y(p[1]);g+="<rect x="+(X(p[0])).toFixed(1)+" y="+y.toFixed(1)+" width="+bw.toFixed(1)+" height="+(Y(0)-y).toFixed(1)+" rx=1 fill='"+col+"'/>"}})}
+  if(c.bars){const nS=ser.length,full=Math.max(1,(W-L-Rr)*step/(x1-x0)-1),bw=Math.max(1,full/nS),off=(s.ci-1)*bw;s.pts.forEach(p=>{if(p[1]>0){const y=Y(p[1]);g+="<rect x="+(X(p[0])+off).toFixed(1)+" y="+y.toFixed(1)+" width="+bw.toFixed(1)+" height="+(Y(0)-y).toFixed(1)+" rx=1 fill='"+col+"'/>"}})}
   else{let d="",prev=null;s.pts.forEach(p=>{d+=(prev===null||p[0]-prev>gap?"M":"L")+X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);prev=p[0]});
    g+="<path d='"+d+"' fill=none stroke='"+col+"' stroke-width=2 stroke-linejoin=round stroke-linecap=round />";
 }});
@@ -1660,6 +1724,8 @@ function tables(){const lo=SINCE||0,DL=D.daylist||[],K=DL.map(()=>({T3:0,T4:0,SY
  const inc=D.incidents.filter(i=>i.ts>=lo),ev=D.events.filter(e=>e.ts>=lo);
  $("#inc").innerHTML=inc.length?"<tr><th>Start</th><th>End</th><th class=num>About (min)</th><th>What happened</th></tr>"+inc.map(i=>"<tr><td>"+i.start+"</td><td>"+i.end+"</td><td class=num>"+(i.mins||"\u2013")+"</td><td>"+esc(i.why)+"</td></tr>").join(""):"<tr><td class=empty>No incidents recorded"+(lo?" since the selected entry":"")+".</td></tr>";
  $("#ev").innerHTML=ev.length?"<tr><th>Time</th><th>Type</th><th>Message</th></tr>"+ev.map(e=>"<tr><td>"+e.time+"</td><td"+((e.type==="T3"||e.type==="T4"||e.type==="PROVISION")?" class=flag":"")+">"+esc(e.type)+"</td><td>"+esc(e.msg)+"</td></tr>").join(""):"<tr><td class=empty>No event log entries"+(lo?" since the selected entry":" collected yet")+".</td></tr>";
+ const TR=(D.traces||[]).filter(t=>t.ts>=lo).reverse();$("#traceCard").style.display=TR.length?"":"none";
+ $("#traces").innerHTML=TR.map(t=>"<details><summary>"+esc(t.time)+" \u00b7 "+esc(t.why)+"</summary><pre style='font-size:12px;overflow:auto'>"+esc(t.out)+"</pre></details>").join("");
  $("#maint").querySelectorAll("tr[data-s]").forEach(r=>r.classList.toggle("sel",r.dataset.s===SID))}
 const ba=w=>{if(!w)return"<span class=ba>\u2013</span>";const r=a=>a&&a[0]!=null?a[0]+".."+a[1]:"?";return"<span class=ba>DS "+r(w.ds)+" \u00b7 US "+r(w.us)+" dBmV<br>"+(w.uncorr_day==null?"\u2013":w.uncorr_day.toLocaleString())+" uncorr/day \u00b7 "+w.t3t4+" T3/T4 \u00b7 "+w.drw+" DRW"+(w.hours<23?" ("+w.hours+" h)":"")+"</span>"};
 $("#maint").innerHTML=(D.maint||[]).length?"<tr><th>#</th><th>When</th><th>Type</th><th>What happened</th><th>24 h before</th><th>24 h after</th></tr>"+D.maint.slice().reverse().map(m=>"<tr data-s='"+esc(m.id)+"'><td class=num>"+m.n+"</td><td>"+m.time+(m.end_time?" to "+(m.end_time.slice(0,10)===m.time.slice(0,10)?m.end_time.slice(11):m.end_time):"")+"</td><td>"+esc(m.type)+(m.status==="suggested"?" <span class=badge>suggested</span>":"")+"</td><td>"+esc(m.note)+" <a class=sl data-s='"+esc(m.id)+"'>show data after this</a></td><td>"+ba(m.before)+"</td><td>"+ba(m.after)+"</td></tr>").join(""):"<tr><td class=empty>No maintenance entries yet.</td></tr>";
@@ -1990,6 +2056,9 @@ def alert_check(cfg, st, row, events_new, chd, info, now):
         queue.append({"ts": int(now), "kind": kind, "title": title, "prio": prio,
                       "msg": "%s %s" % (time.strftime("%b %d %H:%M", time.localtime(now)), msg)})
         log("alert: %s: %s" % (title, msg))
+        if (cfg.get("mqtt_host") or "").strip():
+            mqtt_publish(cfg, (cfg.get("mqtt_topic") or "modem_monitor").strip("/") + "/alert",
+                         json.dumps({"kind": kind, "title": title, "message": msg, "priority": prio, "ts": int(now)}))
 
     queue[:] = [q for q in queue if now - q["ts"] < 86400][-30:]
     if not queue or row.get("ok") != 1 or (loss not in ("", None) and loss >= 100):
@@ -2011,6 +2080,311 @@ def alert_test(cfg):
                       "If you can read this, alerts work. Sent %s from %s." %
                       (time.strftime("%Y-%m-%d %H:%M"), _read("/proc/sys/kernel/hostname") or "the router"), 3, "test")
 
+
+# --------------------------------------------------------------------------
+# Network path: ISP gateway (first hop) ping and traceroute during loss
+# --------------------------------------------------------------------------
+
+TRACE_EVERY_S = 900  # at most one traceroute per 15 minutes
+
+
+def isp_gateway(cfg):
+    """The WAN default gateway: the ISP's router at the other end of the cable
+    segment. Loss to it points at the local cable plant rather than the internet."""
+    t = (cfg.get("gw_target") or "").strip()
+    if t:
+        return t
+    try:
+        j = json.loads(subprocess.run(["ifstatus", "wan"], capture_output=True, text=True, timeout=10).stdout)
+        for r in j.get("route", []):
+            if r.get("target") == "0.0.0.0" and r.get("nexthop") not in (None, "0.0.0.0"):
+                return r["nexthop"]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    try:
+        out = subprocess.run(["ip", "-4", "route", "show", "default"], capture_output=True, text=True, timeout=10).stdout
+        m = re.search(r"via (\d+\.\d+\.\d+\.\d+)", out)
+        return m.group(1) if m else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def trace_file(cfg, ts):
+    return os.path.join(cfg["data_dir"], "traces-%s.log" % time.strftime("%Y-%m", time.localtime(ts)))
+
+
+def start_trace(cfg, st, now, why):
+    """Run traceroute in the background (it can take a while) and append it to
+    the monthly traces log, so the sample itself isn't delayed."""
+    if cfg.get("trace_on_loss", "1") != "1" or now - st.get("last_trace", 0) < TRACE_EVERY_S:
+        return
+    target = (cfg.get("ping_targets") or "1.1.1.1").split()[0]
+    tool = shutil.which("traceroute")
+    if not tool:
+        return
+    st["last_trace"] = int(now)
+    head = "### %d %s | %s | traceroute to %s" % (int(now), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+                                                   why, target)
+    path = trace_file(cfg, now)
+    try:
+        with open(path, "a") as f:
+            f.write(head + "\n")
+        os.chmod(path, 0o644)
+        out = open(path, "a")
+        subprocess.Popen([tool, "-n", "-q", "2", "-w", "2", "-m", "20", target], stdout=out, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        out.close()
+    except OSError as e:
+        log("traceroute failed: %s" % e)
+
+
+def read_traces(cfg, since, limit=30):
+    res = []
+    for p in sorted(glob.glob(os.path.join(cfg["data_dir"], "traces-*.log"))):
+        try:
+            text = open(p).read()
+        except OSError:
+            continue
+        for block in text.split("### ")[1:]:
+            head, _, body = block.partition("\n")
+            m = re.match(r"(\d+) (\S+ \S+) \| (.*?) \| (.*)$", head)
+            if m and int(m.group(1)) >= since:
+                res.append({"ts": int(m.group(1)), "time": m.group(2), "why": m.group(3), "what": m.group(4),
+                            "out": body.strip()[:3000]})
+    return res[-limit:]
+
+
+# --------------------------------------------------------------------------
+# Weather (Open-Meteo, free, no key): outdoor temperature and precipitation
+# --------------------------------------------------------------------------
+
+def weather_now(cfg, st, now):
+    """Current temperature/precipitation for the configured location, fetched at
+    most every 30 minutes. Returns (temp, precip) or (None, None)."""
+    lat, lon = (cfg.get("weather_lat") or "").strip(), (cfg.get("weather_lon") or "").strip()
+    if not lat or not lon:
+        return None, None
+    unit = "fahrenheit" if (cfg.get("weather_unit") or "C").upper().startswith("F") else "celsius"
+    w = st.get("weather") or {}
+    key = "%s,%s,%s" % (lat, lon, unit)
+    if w.get("key") == key and now - w.get("ts", 0) < 1800:
+        return w.get("temp"), w.get("precip")
+    if w.get("key") == key and now - w.get("fail", 0) < 600:
+        return w.get("temp") if now - w.get("ts", 0) < 3 * 3600 else None, None
+    try:
+        url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current=temperature_2m,precipitation"
+               "&temperature_unit=%s&precipitation_unit=%s&timezone=auto" %
+               (float(lat), float(lon), unit, "inch" if unit == "fahrenheit" else "mm"))
+        cur = json.loads(_https_get(url, timeout=10, accept="application/json")).get("current", {})
+        w = {"key": key, "ts": int(now), "temp": cur.get("temperature_2m"), "precip": cur.get("precipitation")}
+    except Exception as e:
+        log("weather fetch failed: %s" % e)
+        w["fail"], w["key"] = int(now), key
+        st["weather"] = w
+        return (w.get("temp") if now - w.get("ts", 0) < 3 * 3600 else None), None
+    st["weather"] = w
+    return w["temp"], w["precip"]
+
+
+def pearson(pairs):
+    pairs = [(a, b) for a, b in pairs if a is not None and b is not None]
+    n = len(pairs)
+    if n < 24:
+        return None, n
+    ma = sum(a for a, _ in pairs) / n
+    mb = sum(b for _, b in pairs) / n
+    sa = sum((a - ma) ** 2 for a, _ in pairs) ** 0.5
+    sb = sum((b - mb) ** 2 for _, b in pairs) ** 0.5
+    if sa == 0 or sb == 0:
+        return None, n
+    return round(sum((a - ma) * (b - mb) for a, b in pairs) / (sa * sb), 2), n
+
+
+def weather_effects(summ):
+    """Hourly correlation of outdoor temperature with upstream/downstream power and
+    errors, and errors during rain vs. dry hours."""
+    hrs = {}
+    for r in summ:
+        h = int(r["ts"]) // 3600
+        x = hrs.setdefault(h, {"t": [], "us": [], "ds": [], "unc": 0, "p": 0.0, "ok": 0})
+        t, us, ds, p = fv(r, "temp"), fv(r, "us_power_avg"), fv(r, "ds_power_avg"), fv(r, "precip")
+        if t is not None:
+            x["t"].append(t)
+        if r.get("ok") == "1":
+            x["ok"] += 1
+            x["unc"] += int(fv(r, "uncorr_delta") or 0)
+            if us is not None:
+                x["us"].append(us)
+            if ds is not None:
+                x["ds"].append(ds)
+        if p:
+            x["p"] = max(x["p"], p)
+    avg = lambda v: sum(v) / len(v) if v else None
+    H = [x for x in hrs.values() if x["t"] and x["ok"]]
+    if len(H) < 24:
+        return None
+    r_us, n = pearson([(avg(x["t"]), avg(x["us"])) for x in H])
+    r_ds, _ = pearson([(avg(x["t"]), avg(x["ds"])) for x in H])
+    r_unc, _ = pearson([(avg(x["t"]), x["unc"]) for x in H])
+    wet = [x for x in H if x["p"] > 0]
+    dry = [x for x in H if x["p"] == 0]
+    rate = lambda xs: round(sum(x["unc"] for x in xs) / float(len(xs))) if xs else None
+    ts = [v for x in H for v in x["t"]]
+    return {"hours": len(H), "r_us": r_us, "r_ds": r_ds, "r_unc": r_unc, "t_min": min(ts), "t_max": max(ts),
+            "wet_hours": len(wet), "unc_wet": rate(wet), "unc_dry": rate(dry)}
+
+
+def weather_text(w, unit):
+    """Plain-language notes; only claims a link when it is reasonably strong."""
+    if not w:
+        return []
+    out = []
+    if w["r_us"] is not None and abs(w["r_us"]) >= 0.5:
+        out.append("Upstream power %s as the outdoor temperature rose (correlation %+.2f over %d hours, %g to %g %s). "
+                   "Levels that track temperature point to a temperature-sensitive fault outdoors, such as a corroded "
+                   "or loose connector or damaged cable." % ("rose" if w["r_us"] > 0 else "fell", w["r_us"], w["hours"],
+                                                              w["t_min"], w["t_max"], unit))
+    if w["r_ds"] is not None and abs(w["r_ds"]) >= 0.5:
+        out.append("Downstream power %s with temperature (correlation %+.2f)." %
+                   ("rose" if w["r_ds"] > 0 else "fell", w["r_ds"]))
+    if w["wet_hours"] >= 3 and w["unc_wet"] is not None and w["unc_dry"] is not None and \
+            w["unc_wet"] >= max(100, 3 * (w["unc_dry"] or 0)):
+        out.append("During %d hours with precipitation the modem saw %s uncorrectables per hour, against %s in dry "
+                   "hours, which suggests water getting into the outdoor cabling or tap." %
+                   (w["wet_hours"], "{:,}".format(w["unc_wet"]), "{:,}".format(w["unc_dry"])))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Integrations: Prometheus text file, MQTT / Home Assistant
+# --------------------------------------------------------------------------
+
+def _pl(v):
+    return "%s" % v if v not in ("", None) else "NaN"
+
+
+def write_metrics(cfg, st, row, ds, us):
+    """Prometheus text format at <web_dir>/metrics.txt (http://router/modem-monitor/metrics.txt),
+    plus an optional copy for a node-exporter textfile collector."""
+    L = []
+    def m(name, help_, typ, samples):
+        L.append("# HELP modem_%s %s" % (name, help_))
+        L.append("# TYPE modem_%s %s" % (name, typ))
+        for labels, v in samples:
+            lab = ",".join('%s="%s"' % (k, str(x).replace('"', "")) for k, x in labels.items())
+            L.append("modem_%s%s %s" % (name, "{%s}" % lab if lab else "", _pl(v)))
+    m("up", "1 if the modem answered the last sample", "gauge", [({}, row.get("ok", 0))])
+    m("sample_timestamp_seconds", "Time of the last sample", "gauge", [({}, row.get("ts"))])
+    if row.get("ok") == 1:
+        m("uptime_seconds", "Modem uptime", "gauge", [({}, row.get("uptime_s"))])
+        dl = lambda c: {"channel": c["ch"], "freq_mhz": c["freq"], "modulation": c["mod"]}
+        m("downstream_power_dbmv", "Downstream receive power", "gauge", [(dl(c), c["power"]) for c in ds])
+        m("downstream_snr_db", "Downstream SNR/MER", "gauge", [(dl(c), c["snr"]) for c in ds])
+        m("downstream_corrected_total", "Corrected codewords (resets on reboot)", "counter", [(dl(c), c["corr"]) for c in ds])
+        m("downstream_uncorrectable_total", "Uncorrectable codewords (resets on reboot)", "counter",
+          [(dl(c), c["uncorr"]) for c in ds])
+        m("upstream_power_dbmv", "Upstream transmit power", "gauge",
+          [({"channel": c["ch"], "freq_mhz": c["freq"]}, c["power"]) for c in us])
+        m("downstream_locked_channels", "Locked downstream channels", "gauge", [({}, row.get("ds_locked"))])
+        m("upstream_locked_channels", "Locked upstream channels", "gauge", [({}, row.get("us_locked"))])
+    m("events_total", "Modem event log entries by type since monitoring began", "counter",
+      [({"type": k}, v) for k, v in sorted((st.get("event_counts") or {}).items())])
+    m("ping_loss_percent", "Packet loss to the internet targets", "gauge", [({}, row.get("ping_loss"))])
+    m("ping_rtt_ms", "Average ping to the internet targets", "gauge", [({}, row.get("ping_avg_ms"))])
+    if row.get("gw_loss") not in ("", None):
+        m("gateway_loss_percent", "Packet loss to the ISP gateway (first hop)", "gauge", [({}, row.get("gw_loss"))])
+        m("gateway_rtt_ms", "Average ping to the ISP gateway", "gauge", [({}, row.get("gw_avg_ms"))])
+    if row.get("temp") not in ("", None):
+        m("outdoor_temperature", "Outdoor temperature (Open-Meteo)", "gauge", [({}, row.get("temp"))])
+    text = "\n".join(L) + "\n"
+    for path in [os.path.join(cfg["web_dir"], "metrics.txt"), (cfg.get("prom_textfile") or "").strip()]:
+        if not path:
+            continue
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path + ".tmp", "w") as f:
+                f.write(text)
+            os.chmod(path + ".tmp", 0o644)
+            os.replace(path + ".tmp", path)
+        except OSError as e:
+            log("metrics write failed (%s): %s" % (path, e))
+
+
+HA_SENSORS = [
+    # key, name, unit, device_class, icon
+    ("ds_power_min", "Downstream power (lowest)", "dBmV", None, "mdi:arrow-down-bold"),
+    ("ds_power_max", "Downstream power (highest)", "dBmV", None, "mdi:arrow-down-bold"),
+    ("ds_snr_min", "Downstream SNR (lowest)", "dB", None, "mdi:signal"),
+    ("us_power_max", "Upstream power (highest)", "dBmV", None, "mdi:arrow-up-bold"),
+    ("uncorr_delta", "Uncorrectables (last sample)", None, None, "mdi:alert-circle"),
+    ("uptime_s", "Modem uptime", "s", "duration", None),
+    ("ping_loss", "Internet packet loss", "%", None, "mdi:lan-disconnect"),
+    ("ping_avg_ms", "Internet ping", "ms", "duration", None),
+    ("gw_loss", "ISP gateway packet loss", "%", None, "mdi:lan-disconnect"),
+    ("gw_avg_ms", "ISP gateway ping", "ms", "duration", None),
+    ("t3_today", "T3 timeouts today", None, None, "mdi:timer-alert"),
+    ("t4_today", "T4 timeouts today", None, None, "mdi:timer-alert"),
+]
+
+
+def mqtt_publish(cfg, topic, payload, retain=False):
+    host = (cfg.get("mqtt_host") or "").strip()
+    tool = shutil.which("mosquitto_pub")
+    if not host or not tool:
+        return False
+    cmd = [tool, "-h", host, "-p", str(int(fnum(cfg, "mqtt_port")) or 1883), "-t", topic, "-s",
+           "-i", "modem-monitor-%d" % os.getpid()]
+    if cfg.get("mqtt_user"):
+        cmd += ["-u", cfg["mqtt_user"]]
+        if cfg.get("mqtt_pass"):
+            cmd += ["-P", cfg["mqtt_pass"]]
+    if cfg.get("mqtt_tls") == "1":
+        ca = next((c for c in CA_FILES if os.path.exists(c)), None)
+        if ca:
+            cmd += ["--cafile", ca]
+    if retain:
+        cmd.append("-r")
+    try:
+        out = subprocess.run(cmd, input=payload.encode("utf-8"), capture_output=True, timeout=15)
+        if out.returncode != 0:
+            log("mqtt publish failed: %s" % (out.stderr or b"").decode("utf-8", "replace").strip()[:200])
+        return out.returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        log("mqtt publish failed: %s" % e)
+        return False
+
+
+def mqtt_update(cfg, st, row, today):
+    if not (cfg.get("mqtt_host") or "").strip():
+        return
+    base = (cfg.get("mqtt_topic") or "modem_monitor").strip("/")
+    state = {k: row.get(k) for k, *_ in HA_SENSORS if row.get(k) not in ("", None)}
+    state.update(t3_today=today.get("T3", 0), t4_today=today.get("T4", 0), online="ON" if row.get("ok") == 1 else "OFF",
+                 ts=row.get("ts"), error=row.get("error") or "")
+    if row.get("temp") not in ("", None):
+        state["temp"] = row["temp"]
+    if cfg.get("mqtt_discovery", "1") == "1" and st.get("mqtt_disc") != VERSION + base:
+        pre = (cfg.get("mqtt_discovery_prefix") or "homeassistant").strip("/")
+        dev = {"identifiers": ["modem_monitor_" + base], "name": "Cable modem",
+               "model": (st.get("modem_info") or {}).get("model") or "Cable modem",
+               "sw_version": (st.get("modem_info") or {}).get("firmware") or "", "manufacturer": "modem-monitor"}
+        ok = True
+        for key, name, unit, dc, icon in HA_SENSORS:
+            c = {"name": name, "unique_id": "%s_%s" % (base, key), "state_topic": base + "/state",
+                 "value_template": "{{ value_json.%s }}" % key, "device": dev, "state_class": "measurement"}
+            if unit:
+                c["unit_of_measurement"] = unit
+            if dc:
+                c["device_class"] = dc
+            if icon:
+                c["icon"] = icon
+            ok &= mqtt_publish(cfg, "%s/sensor/%s/%s/config" % (pre, base, key), json.dumps(c), retain=True)
+        c = {"name": "Modem online", "unique_id": base + "_online", "state_topic": base + "/state",
+             "value_template": "{{ value_json.online }}", "device_class": "connectivity", "device": dev}
+        ok &= mqtt_publish(cfg, "%s/binary_sensor/%s/online/config" % (pre, base), json.dumps(c), retain=True)
+        if ok:
+            st["mqtt_disc"] = VERSION + base
+    mqtt_publish(cfg, base + "/state", json.dumps(state), retain=True)
 
 # --------------------------------------------------------------------------
 # Printable complaint summary for a date range
@@ -2146,10 +2520,15 @@ def complaint_summary(cfg, d_from, d_to):
                 "outages": len(outs), "down_min": down_min, "loss_polls": S("loss"), "polls": S("polls"),
                 "us_peak": max(usm) if usm else None, "us_over_days": sum(1 for x in rows if x["us_over"]),
                 "link_err": S("link_err"), "link_on": bool(links),
+                "gw_loss_polls": sum(1 for r in summ if (fv(r, "gw_loss") or 0) > 0),
+                "gw_on": any(fv(r, "gw_loss") is not None for r in summ),
+                "both_loss": sum(1 for r in summ if (fv(r, "gw_loss") or 0) > 0 and (fv(r, "ping_loss") or 0) > 0),
+                "traces": len(read_traces(cfg, lo, 1000)),
                 "loss_avg": round(sum(pings) / len(pings), 2) if pings else None,
                 "worst_day": worst["day"] if worst and worst["uncorr"] else None,
                 "worst_unc": worst["uncorr"] if worst else 0},
         "days": rows, "ingress": ingress,
+        "weather": weather_text(weather_effects(summ), "\u00b0F" if (cfg.get("weather_unit") or "C").upper().startswith("F") else "\u00b0C"),
         "outages": [{"start": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["start"])),
                      "mins": round((o["end"] - o["start"]) / 60 + interval / 60), "why": o["why"]} for o in outs][:60],
         "maint": [{"time": m["time"][:16], "end": (m.get("end_time") or "")[:16], "type": m["type"], "note": m["note"],
@@ -2214,6 +2593,8 @@ const NI=D.ingress.filter(i=>i.kind==="narrow");
 if(NI.length)F.push("On <b>"+pl(NI.length,"day")+"</b> the errors were concentrated on a few adjacent channels ("+NI.slice(0,4).map(i=>i.day+": "+i.share+"% on "+i.fmin+"–"+i.fmax+" MHz").join("; ")+(NI.length>4?"; …":"")+"). Errors confined to a narrow band are typical of <b>RF ingress</b>: an outside signal leaking into the cable through a damaged line, loose connector or faulty tap.");
 if(T.us_peak!=null&&T.us_peak>L.us_power_max)F.push("Upstream transmit power reached <b>"+T.us_peak+" dBmV</b>, above the "+L.us_power_max+" dBmV guideline, on "+pl(T.us_over_days,"day")+": the modem had to transmit at or near its maximum to be heard, which suggests loss in the line or tap.");
 {const u=Math.max(0,T.reboots-T.router_reboots),P=[];if(u)P.push("rebooted "+pl(u,"time")+" on its own");if(T.relocks)P.push("lost signal and re-registered "+pl(T.relocks,"time")+" without rebooting");if(P.length)F.push("The modem "+P.join(" and ")+"."+(T.router_reboots?" ("+pl(T.router_reboots,"planned reboot")+" listed below "+(T.router_reboots===1?"is":"are")+" not counted.)":""))}
+if(T.gw_on&&T.loss_polls){if(T.both_loss>=Math.max(1,T.loss_polls/2))F.push("In "+pl(T.both_loss,"sample")+" with packet loss, pings to "+esc(isp)+"\u2019s own gateway (the first hop past the modem) failed too, so the loss starts on the local cable segment, not further out on the internet."+(T.traces?" "+pl(T.traces,"traceroute was","traceroutes were")+" saved during the loss.":""));else if(T.traces)F.push(pl(T.traces,"traceroute was","traceroutes were")+" saved during packet loss.")}
+(D.weather||[]).forEach(w=>F.push(esc(w)));
 if(T.outages)F.push(pl(T.outages,"outage")+" (modem unreachable or no internet), about "+f(T.down_min)+" minutes in total.");
 if(T.link_on)F.push(T.link_err?"The router recorded "+f(T.link_err)+" Ethernet errors on its connection to the modem.":"The router’s Ethernet connection to the modem recorded <b>no errors</b>, which rules out the home router and the router–modem cable.");
 if(!F.length)F.push("No problems were recorded in this period.");
