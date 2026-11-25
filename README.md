@@ -82,7 +82,7 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 | `data_dir` | auto (see Install) | CSV history (persistent storage) |
 | `retention_days` | auto: 400 / 180 / 90 | History older than this is deleted |
 | `modem_type` | `auto` | `auto`, `s33` (S33/S34), `arris_html` (SB8200/SB6183/SB6190), `netgear` |
-| `hires_ping`, `hires_target`, `hires_drop_min` | `0`, `gateway`, `2` | 1-second probe on/off, target (`gateway` or an address), lost seconds that count as a dropout |
+| `hires_ping`, `hires_target`, `hires_drop_min` | `0`, `gateway`, `2` | 1-second probe on/off, target (`gateway` = the ISP gateway, or the next hop that answers pings if it doesn't; or a fixed address), lost seconds that count as a dropout |
 | `channel_watch` | `1` | Flag and alert on missing bonded channels |
 | `daily_digest`, `digest_hour` | `0`, `8` | Morning summary of yesterday via the alert channels |
 | `overview_tile` | `1` | Tile on Status → Overview |

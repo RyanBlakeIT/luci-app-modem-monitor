@@ -338,12 +338,20 @@ return view.extend({
 		o.rmempty = false;
 
 		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Alerts'),
-			_('Get a phone notification when the line misbehaves. Easiest: install the free <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> app, subscribe to a hard-to-guess topic name, and enter that name below. Alerts raised while the internet is down are sent once it is back.'));
+			_('Phone or email notifications when the line misbehaves. Turn alerts on under General, pick what to be told about, then fill in one or more services (ntfy is the easiest: free, no account). Alerts raised while the internet is down are sent once it is back.'));
+		s.tab('general', _('General'));
+		s.tab('ntfy', _('ntfy'));
+		s.tab('pushover', _('Pushover'));
+		s.tab('telegram', _('Telegram'));
+		s.tab('webhook', _('Webhook'));
+		s.tab('email', _('Email'));
+		s.tab('digest', _('Daily summary'));
 
-		o = s.option(form.Flag, 'alert_enabled', _('Send alerts'));
+		/* General: on/off, what to alert on, thresholds, test */
+		o = s.taboption('general', form.Flag, 'alert_enabled', _('Send alerts'));
 		o.rmempty = false;
 
-		o = s.option(form.MultiValue, 'alert_on', _('Alert on'));
+		o = s.taboption('general', form.MultiValue, 'alert_on', _('Alert on'));
 		o.value('outage', _('Modem unreachable / back online'));
 		o.value('reboot', _('Modem rebooted on its own'));
 		o.value('relock', _('Modem re-registered (lost signal)'));
@@ -354,37 +362,6 @@ return view.extend({
 		o.value('channels', _('Modem lost bonded channels'));
 		o.value('dropouts', _('Short dropouts (needs the 1-second probe)'));
 		o.default = 'outage reboot relock t3t4 uncorr us_power loss channels dropouts';
-		o.depends('alert_enabled', '1');
-
-		o = s.option(form.Value, 'alert_ntfy_url', _('ntfy topic or URL'),
-			_('A topic name (sent to ntfy.sh), or a full URL such as https://ntfy.example.com/modem for a self-hosted server. Anyone who knows a public topic name can read it, so pick something long and random.'));
-		o.placeholder = 'modem-' + Math.random().toString(36).slice(2, 12);
-		o.depends('alert_enabled', '1');
-
-		o = s.option(form.Value, 'alert_ntfy_token', _('ntfy access token'), _('Only for protected topics.'));
-		o.password = true;
-		o.depends('alert_enabled', '1');
-
-		o = s.option(form.Value, 'alert_pushover_user', _('Pushover user key'));
-		o.depends('alert_enabled', '1');
-		o = s.option(form.Value, 'alert_pushover_token', _('Pushover app token'));
-		o.password = true;
-		o.depends('alert_enabled', '1');
-
-		o = s.option(form.Value, 'alert_telegram_token', _('Telegram bot token'));
-		o.password = true;
-		o.depends('alert_enabled', '1');
-		o = s.option(form.Value, 'alert_telegram_chat', _('Telegram chat ID'));
-		o.depends('alert_enabled', '1');
-
-		o = s.option(form.Value, 'alert_webhook_url', _('Webhook URL'),
-			_('Receives a JSON POST: {"title", "message", "kind", "priority", "ts", "host"}. Works with Home Assistant, Discord-style relays, n8n and similar.'));
-		o.depends('alert_enabled', '1');
-
-		o = s.option(form.Value, 'alert_email_to', _('Email to'),
-			_('Needs a working sendmail on the router (for example the msmtp package, configured with your mail provider).'));
-		o.datatype = 'string';
-		o.depends('alert_enabled', '1');
 
 		[ [ 'alert_t3t4_count', _('T3/T4 timeouts within an hour'), '3', 'range(1,100)' ],
 		  [ 'alert_uncorr', _('Uncorrectables in one sample'), '5000', 'uinteger' ],
@@ -392,42 +369,74 @@ return view.extend({
 		  [ 'alert_outage_polls', _('Failed samples in a row before "unreachable"'), '2', 'range(1,12)' ],
 		  [ 'alert_dropouts', _('Short dropouts in one sample'), '3', 'range(1,300)' ],
 		  [ 'alert_cooldown_min', _('Repeat the same alert at most every (minutes)'), '60', 'range(0,1440)' ] ].forEach(function(f) {
-			o = s.option(form.Value, f[0], f[1]);
+			o = s.taboption('general', form.Value, f[0], f[1]);
 			o.placeholder = f[2];
 			o.datatype = f[3];
-			o.depends('alert_enabled', '1');
 		});
 
-		o = s.option(form.Flag, 'daily_digest', _('Daily summary'),
-			_('Each morning, one notification summarizing yesterday (timeouts, errors, levels, outages, dropouts), sent to the channels above. Quiet days are worth having on record too.'));
-		o.rmempty = false;
-		o.depends('alert_enabled', '1');
+		o = s.taboption('general', form.Button, '_alert_test', _('Test'),
+			_('Sends a test to every service that is filled in and shows which worked. Uses the saved settings, so Save & Apply first.'));
+		o.inputtitle = _('Send a test alert');
+		o.inputstyle = 'action';
+		o.onclick = function() {
+			return fs.exec('/usr/bin/modem-monitor', [ 'alert-test' ]).then(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' },
+					((res.stdout || '') + (res.stderr || '')).trim() || _('No answer.')), res.code === 0 ? 'info' : 'warning');
+			});
+		};
 
-		o = s.option(form.ListValue, 'digest_hour', _('Send the daily summary at'));
+		/* ntfy */
+		o = s.taboption('ntfy', form.Value, 'alert_ntfy_url', _('Topic or URL'),
+			_('Install the free <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> app and subscribe to a topic name. Enter the same name here (sent to ntfy.sh), or a full URL such as https://ntfy.example.com/modem for a self-hosted server. Anyone who knows a public topic name can read it, so pick something long and random.'));
+		o.placeholder = 'modem-' + Math.random().toString(36).slice(2, 12);
+
+		o = s.taboption('ntfy', form.Value, 'alert_ntfy_token', _('Access token'), _('Only for protected topics.'));
+		o.password = true;
+
+		/* Pushover */
+		o = s.taboption('pushover', form.Value, 'alert_pushover_user', _('User key'),
+			_('From your <a href="https://pushover.net" target="_blank" rel="noopener">Pushover</a> dashboard.'));
+		o = s.taboption('pushover', form.Value, 'alert_pushover_token', _('App token'),
+			_('Create an application in Pushover and paste its API token.'));
+		o.password = true;
+
+		/* Telegram */
+		o = s.taboption('telegram', form.Value, 'alert_telegram_token', _('Bot token'),
+			_('Create a bot by messaging @BotFather in Telegram; it replies with the token.'));
+		o.password = true;
+		o = s.taboption('telegram', form.Value, 'alert_telegram_chat', _('Chat ID'),
+			_('Send your bot a message, then open https://api.telegram.org/bot&lt;token&gt;/getUpdates and copy the number after "chat":{"id":'));
+
+		/* Webhook */
+		o = s.taboption('webhook', form.Value, 'alert_webhook_url', _('Webhook URL'),
+			_('Receives a JSON POST: {"title", "message", "kind", "priority", "ts", "host"}. Works with Home Assistant automations, n8n, Node-RED and similar.'));
+		o.placeholder = 'https://homeassistant.local:8123/api/webhook/modem-alerts';
+
+		/* Email */
+		o = s.taboption('email', form.Value, 'alert_email_to', _('Send to'),
+			_('Needs a working sendmail on the router: install the msmtp package and set it up with your mail provider (for Gmail, use an app password).'));
+		o.placeholder = 'you@example.com';
+		o = s.taboption('email', form.Value, 'alert_email_from', _('From address'), _('Optional.'));
+		o.placeholder = 'modem-monitor@router';
+
+		/* Daily summary */
+		o = s.taboption('digest', form.Flag, 'daily_digest', _('Send a daily summary'),
+			_('Each morning, one notification summarizing yesterday (timeouts, errors, levels, outages, dropouts), sent to the services on the other tabs. Quiet days are worth having on record too.'));
+		o.rmempty = false;
+
+		o = s.taboption('digest', form.ListValue, 'digest_hour', _('Send at'));
 		for (var h = 0; h < 24; h++)
 			o.value(String(h), '%02d:00'.format(h));
 		o.default = '8';
 		o.depends('daily_digest', '1');
 
-		o = s.option(form.Button, '_digest_test', _('Daily summary'));
+		o = s.taboption('digest', form.Button, '_digest_test', _('Try it'));
 		o.inputtitle = _('Send yesterday\'s summary now');
 		o.inputstyle = 'action';
 		o.depends('daily_digest', '1');
 		o.onclick = function() {
 			return fs.exec('/usr/bin/modem-monitor', [ 'digest', '--send' ]).then(function(res) {
 				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' }, ((res.stdout || '') + (res.stderr || '')).trim()), 'info');
-			});
-		};
-
-		o = s.option(form.Button, '_alert_test', _('Test'));
-		o.inputtitle = _('Send a test alert');
-		o.inputstyle = 'action';
-		o.depends('alert_enabled', '1');
-		o.onclick = function() {
-			return fs.exec('/usr/bin/modem-monitor', [ 'alert-test' ]).then(function(res) {
-				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap' },
-					(((res.stdout || '') + (res.stderr || '')).trim() || _('No answer.')) + '\n\n' + _('Uses the saved settings, so Save & Apply first.')),
-					res.code === 0 ? 'info' : 'warning');
 			});
 		};
 

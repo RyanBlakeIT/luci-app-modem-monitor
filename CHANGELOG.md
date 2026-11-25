@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.1
+- **Latency probe target falls back automatically.** With the target set to `gateway` (the default), the probe checks that the ISP gateway answers pings. If it doesn't, the probe uses the next hop along the path that does, found by traceroute, and only then the first ping target. The report shows which target is in use and why.
+- **The probe re-checks its target while running.** If the target stops answering while ordinary pings to the internet get through, that window is discarded rather than counted as dropouts, and a new target is chosen. A target that keeps dropping 20% or more for three samples while the internet is clean is replaced too. Every 6 hours the probe checks whether the gateway itself answers again.
+- **Settings → Alerts is split into tabs:** General (on/off, what to alert on, thresholds, test), ntfy, Pushover, Telegram, Webhook, Email and Daily summary, each with setup notes.
+
 ## 1.6.0
 Each of these can be turned on or off under Settings.
 - **Outage credits** (on by default): an **Outages by month** card on the report shows outages, minutes, re-registrations, short dropouts, days affected and an estimated credit (prorated, and per affected day, if you enter your monthly price). The new **Credit letter** button drafts a request letter for a month from your name, account and address under Settings → Outage credits. You can edit the letter before printing or copying it. Planned work is left out, and outages you logged for times before monitoring began are listed as your own notes, not added to the measured total.

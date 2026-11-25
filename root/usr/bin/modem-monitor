@@ -54,7 +54,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1501,6 +1501,10 @@ def poll(cfg):
     row["ping_max_ms"] = rnd(max(maxs)) if maxs else ""
     if PROBER is not None:
         row.update(probe_stats(PROBER.take(), max(1, int(fnum(cfg, "hires_drop_min")))))
+        try:
+            probe_health(cfg, st, row)
+        except Exception as e:
+            log("probe check error: %r" % e)
     row["gw_loss"] = row["gw_avg_ms"] = ""
     if cfg.get("gw_ping", "1") == "1":
         gw = isp_gateway(cfg)
@@ -1922,6 +1926,7 @@ def build_report(cfg):
     data["weather_notes"] = weather_text(weather_effects(summ), unit) if data["weather_on"] else []
     data["traces"] = read_traces(cfg, now - 30 * 86400)
     data["hires_on"] = cfg.get("hires_ping", "0") == "1" or any(fv(r, "hr_sent") for r in summ)
+    data["probe"] = load_state(cfg).get("probe") if data["hires_on"] else None
     sp = read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], now - 90 * 86400)
     data["speed"] = [[int(r["ts"]), fv(r, "down_mbps"), fv(r, "up_mbps"), fv(r, "idle_ms"), fv(r, "loaded_ms"), r.get("error", "")]
                      for r in sp]
@@ -2166,7 +2171,7 @@ const CH=[
  {id:"latency",title:"Ping latency",unit:"ms",note:"Average round-trip time to the internet and to the ISP gateway."},
  {id:"link_err",title:"Router\u2013modem Ethernet errors",unit:"per interval",bars:true,note:"CRC, alignment and collision counters on the router's WAN port. Should stay at zero; errors here point to the router\u2013modem cable or ports, not "+(D.isp||"your ISP")+"."},
  {id:"missed",title:"Router NIC missed packets",unit:"per interval",bars:true,note:"Packets the router's WAN port dropped because its receive buffer filled (router CPU/IRQ load). A router tuning issue, not a line or cable fault."}];
-if(D.hires_on){CH.push({id:"drops",title:"Short dropouts",unit:"count",bars:true,note:"From one ping per second to "+(D.isp||"the ISP")+"\u2019s gateway: runs of lost pings too short for the regular samples to catch (they show up in games and calls as freezes)."});
+if(D.hires_on){CH.push({id:"drops",title:"Short dropouts",unit:"count",bars:true,note:"From one ping per second to "+(D.probe?D.probe.target+" ("+D.probe.why+")":(D.isp||"the ISP")+"\u2019s gateway")+": runs of lost pings too short for the regular samples to catch (they show up in games and calls as freezes)."});
  CH.push({id:"jitter",title:"Jitter and worst latency",unit:"ms",note:"From the 1-second pings: p95 is the latency the slowest 5% of pings exceeded; jitter is the average change between consecutive pings."})}
 if(D.weather_on)CH.push({id:"temp",title:"Outdoor temperature",unit:D.temp_unit,note:(D.weather_notes&&D.weather_notes.length?D.weather_notes.join(" "):"From Open-Meteo for the configured location. Compare with upstream power and errors: faults in outdoor cabling often change with temperature or rain.")});
 const fmtT=(t,span)=>{const d=new Date(t*1000);return span<=86400*1.2?d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):span<=86400*4?d.toLocaleDateString([], {month:"short",day:"numeric"})+" "+d.toLocaleTimeString([], {hour:"numeric"}):d.toLocaleDateString([], {month:"short",day:"numeric"})};
@@ -3124,11 +3129,91 @@ def probe_stats(recs, drop_min=2):
 PROBER = None
 
 
-def probe_target(cfg):
+def path_hops(cfg, max_hops=6):
+    """First hops toward the internet (traceroute), for when the gateway
+    doesn't answer pings itself."""
+    tool = shutil.which("traceroute")
+    target = (cfg.get("ping_targets") or "1.1.1.1").split()[0]
+    if not tool:
+        return []
+    try:
+        out = subprocess.run([tool, "-n", "-q", "1", "-w", "1", "-m", str(max_hops), target],
+                             capture_output=True, text=True, timeout=max_hops * 3 + 10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    hops = []
+    for line in out.splitlines():
+        m = re.match(r"\s*(\d+)\s+(\d+\.\d+\.\d+\.\d+)", line)
+        if m and m.group(2) not in hops:
+            hops.append(m.group(2))
+    return hops
+
+
+def probe_target(cfg, st=None, exclude=()):
+    """hires_target "gateway" (default) means: the ISP gateway if it answers
+    pings, otherwise the next hop along the path that does, otherwise the first
+    ping target. Any other value is used as given."""
     t = (cfg.get("hires_target") or "gateway").strip()
-    if t in ("", "gateway"):
-        return isp_gateway(cfg) or (cfg.get("ping_targets") or "1.1.1.1").split()[0]
-    return t
+    fallback = (cfg.get("ping_targets") or "1.1.1.1").split()[0]
+    if t not in ("", "gateway"):
+        return t
+    cands = []
+    gw = isp_gateway(cfg)
+    for c in ([gw] if gw else []) + path_hops(cfg):
+        if c and c not in cands and c not in exclude:
+            cands.append(c)
+    tried = []
+    for c in cands[:6]:
+        loss, _avg, _mx = ping(c, 5)
+        tried.append("%s %s%%" % (c, "?" if loss is None else int(loss)))
+        if loss is not None and loss <= 20:
+            why = "ISP gateway" if c == gw else "first hop past the gateway that answers pings"
+            if st is not None:
+                st["probe"] = {"target": c, "why": why, "tried": tried, "ts": int(time.time())}
+            log("latency probe target: %s (%s; tried %s)" % (c, why, ", ".join(tried)))
+            return c
+    if st is not None:
+        st["probe"] = {"target": fallback, "why": "no hop near you answers pings; using the first ping target",
+                       "tried": tried, "ts": int(time.time())}
+    log("latency probe target: %s (no nearby hop answered pings; tried %s)" % (fallback, ", ".join(tried) or "none"))
+    return fallback
+
+
+HR_KEYS = ("hr_sent", "hr_loss", "hr_avg", "hr_p95", "hr_max", "hr_jitter", "hr_drops", "hr_longest")
+
+
+def probe_health(cfg, st, row):
+    """If the probe target stops answering while ordinary pings to the internet
+    all get through, the target (not the line) is the problem: discard that
+    window and pick a new target. Partial answers (rate limiting) for three
+    windows in a row also trigger a new choice."""
+    global PROBER
+    if PROBER is None or not row.get("hr_sent"):
+        return
+    net_ok = row.get("ping_loss") not in ("", None) and row["ping_loss"] == 0
+    bad = net_ok and row.get("hr_loss", 0) >= 100
+    flaky = net_ok and row.get("hr_loss", 0) >= 20
+    st["probe_flaky"] = st.get("probe_flaky", 0) + 1 if flaky else 0
+    pr = st.get("probe") or {}
+    if not (bad or flaky) and pr.get("why", "").startswith(("first hop", "no hop")) and \
+            time.time() - pr.get("ts", 0) > 6 * 3600:
+        # every 6 h, check whether the gateway itself answers again
+        st["probe"]["ts"] = int(time.time())
+        new = probe_target(cfg, st)
+        if new != PROBER.target:
+            PROBER.stop = True
+            PROBER = Prober(new).start()
+        return
+    if bad or st["probe_flaky"] >= 3:
+        old = PROBER.target
+        log("latency probe: %s %s while the internet answered normally; choosing another target" %
+            (old, "stopped answering" if bad else "keeps dropping pings"))
+        if bad:
+            for k in HR_KEYS:
+                row[k] = ""  # not a line problem: don't count it
+        PROBER.stop = True
+        PROBER = Prober(probe_target(cfg, st, exclude=(old,))).start()
+        st["probe_flaky"] = 0
 
 
 # --------------------------------------------------------------------------
@@ -3500,7 +3585,7 @@ def speed_test(cfg):
     cap = max(10, int(fnum(cfg, "speedtest_max_mb"))) * 1000000
     now = time.time()
     row = {"ts": int(now), "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), "server": url, "error": ""}
-    tgt = probe_target(cfg)
+    tgt = (load_state(cfg).get("probe") or {}).get("target") or probe_target(cfg)
     try:
         p = Prober(tgt).start()
         time.sleep(4)
@@ -4346,7 +4431,9 @@ def daemon(cfg):
     last_upd = time.time() - 6 * 3600 + 600  # first check ~10 min after start
     global PROBER
     if cfg.get("hires_ping", "0") == "1":
-        PROBER = Prober(probe_target(cfg)).start()
+        st = load_state(cfg)
+        PROBER = Prober(probe_target(cfg, st)).start()
+        save_state(cfg, st)
     while True:
         t0 = time.time()
         try:
