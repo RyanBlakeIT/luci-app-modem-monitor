@@ -23,6 +23,7 @@ Commands:
                          one-page printable summary for a complaint (default: last 30 days);
                          disruption from planned work is left out unless --all
   modem-monitor alert-test   send a test notification to every configured alert channel
+  modem-monitor weather [--fetch] [--json]   latest outdoor reading (fetch now with --fetch)
   modem-monitor credit [--month YYYY-MM] [--json]   outage totals and a credit-request letter
   modem-monitor backup   copy the data off the router now (see backup_dest)
   modem-monitor speedtest [--background] [--json]   run a speed test now
@@ -54,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -2752,7 +2753,7 @@ def read_traces(cfg, since, limit=30):
 # Weather (Open-Meteo, free, no key): outdoor temperature and precipitation
 # --------------------------------------------------------------------------
 
-def weather_now(cfg, st, now):
+def weather_now(cfg, st, now, force=False):
     """Current temperature/precipitation for the configured location, fetched at
     most every 30 minutes. Returns (temp, precip) or (None, None)."""
     lat, lon = (cfg.get("weather_lat") or "").strip(), (cfg.get("weather_lon") or "").strip()
@@ -2761,19 +2762,22 @@ def weather_now(cfg, st, now):
     unit = "fahrenheit" if (cfg.get("weather_unit") or "C").upper().startswith("F") else "celsius"
     w = st.get("weather") or {}
     key = "%s,%s,%s" % (lat, lon, unit)
-    if w.get("key") == key and now - w.get("ts", 0) < 1800:
+    if not force and w.get("key") == key and now - w.get("ts", 0) < 1800:
         return w.get("temp"), w.get("precip")
-    if w.get("key") == key and now - w.get("fail", 0) < 600:
+    if not force and w.get("key") == key and now - w.get("fail", 0) < 600:
         return w.get("temp") if now - w.get("ts", 0) < 3 * 3600 else None, None
     try:
         url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&current=temperature_2m,precipitation"
                "&temperature_unit=%s&precipitation_unit=%s&timezone=auto" %
                (float(lat), float(lon), unit, "inch" if unit == "fahrenheit" else "mm"))
         cur = json.loads(_https_get(url, timeout=10, accept="application/json")).get("current", {})
-        w = {"key": key, "ts": int(now), "temp": cur.get("temperature_2m"), "precip": cur.get("precipitation")}
+        if cur.get("temperature_2m") is None:
+            raise ModemError("Open-Meteo returned no current temperature for %s, %s" % (lat, lon))
+        w = {"key": key, "ts": int(now), "temp": cur.get("temperature_2m"), "precip": cur.get("precipitation"),
+             "obs": cur.get("time", "")}
     except Exception as e:
         log("weather fetch failed: %s" % e)
-        w["fail"], w["key"] = int(now), key
+        w["fail"], w["key"], w["error"] = int(now), key, str(getattr(e, "reason", e))[:200]
         st["weather"] = w
         return (w.get("temp") if now - w.get("ts", 0) < 3 * 3600 else None), None
     st["weather"] = w
@@ -4549,6 +4553,30 @@ def main():
         print(p)
     elif cmd == "test":
         sys.exit(test(cfg, "--raw" in args))
+    elif cmd == "weather":
+        st = load_state(cfg)
+        info = {"configured": bool((cfg.get("weather_lat") or "").strip() and (cfg.get("weather_lon") or "").strip()),
+                "unit": "F" if (cfg.get("weather_unit") or "C").upper().startswith("F") else "C",
+                "lat": cfg.get("weather_lat", ""), "lon": cfg.get("weather_lon", "")}
+        if info["configured"] and "--fetch" in args:
+            weather_now(cfg, st, time.time(), force=True)
+            if os.path.isdir(cfg["data_dir"]):
+                fresh = load_state(cfg)
+                fresh["weather"] = st.get("weather")
+                save_state(cfg, fresh)
+        w = st.get("weather") or {}
+        info.update(temp=w.get("temp"), precip=w.get("precip"), ts=w.get("ts"), obs=w.get("obs", ""),
+                    error=w.get("error", "") if w.get("fail", 0) > w.get("ts", 0) else "",
+                    gateway=isp_gateway(cfg) if "--net" in args else None, probe=st.get("probe"))
+        if "--json" in args:
+            print(json.dumps(info))
+        elif not info["configured"]:
+            print("weather: no location set (weather_lat / weather_lon)")
+        else:
+            print("%s\u00b0%s, precipitation %s %s, fetched %s%s" % (
+                info["temp"], info["unit"], info["precip"], "in" if info["unit"] == "F" else "mm",
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(info["ts"])) if info["ts"] else "never",
+                ("  (last attempt failed: %s)" % info["error"]) if info["error"] else ""))
     elif cmd == "credit":
         pos, kv, bools = _opts(args[1:], ("--month",))
         ym = kv.get("month") or time.strftime("%Y-%m")

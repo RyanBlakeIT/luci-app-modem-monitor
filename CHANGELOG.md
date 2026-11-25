@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.4
+- **Settings → Network & weather shows the latest weather reading:** temperature, precipitation, when it was fetched, and Open-Meteo's observation time. A failed fetch shows its reason. **Fetch now** gets a fresh reading for the saved location.
+- The same tab shows what's **in use now**: the detected ISP gateway, and the 1-second probe's target with the reason it was chosen and the hops it tried.
+- CLI: `modem-monitor weather [--fetch] [--json]`.
+
 ## 1.6.3
 - **No more stale pages after an update.** LuCI's page scripts are installed in a folder named after the release (`view/modem-monitor/v1_6_3/`), and the menu points there. The browser can't keep running an old cached script after an upgrade; previously this could take a cache-clearing reload, as with the 1.6.2 Settings tabs.
 

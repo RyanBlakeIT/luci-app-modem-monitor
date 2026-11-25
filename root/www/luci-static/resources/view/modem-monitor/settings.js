@@ -59,12 +59,15 @@ return view.extend({
 			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'version' ]).then(function(r) { return (r.stdout || '').trim(); }), ''),
 			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'update-check', '--json', '--cached' ]).then(function(r) {
 				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
+			}), null),
+			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'weather', '--json', '--net' ]).then(function(r) {
+				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
 			}), null)
 		]);
 	},
 
 	render: function(data) {
-		var m, s, o, ver = data[0], upd = data[1], self = this;
+		var m, s, o, ver = data[0], upd = data[1], wx = data[2], self = this;
 
 		m = new form.Map('modem_monitor', _('Cable Modem Monitor'),
 			_('Polls the cable modem (tested with the Arris SURFboard S33) for signal levels, error counters and its event log, and pings the internet, every few minutes. Save & Apply, then use "Test connection" on the Modem tab.') + ' ' + versionLine(ver, upd));
@@ -288,6 +291,17 @@ return view.extend({
 		o.placeholder = _('auto');
 		o.depends('gw_ping', '1');
 
+		o = s.option(form.DummyValue, '_gwinfo', _('In use now'));
+		o.rawhtml = true;
+		o.cfgvalue = function() {
+			var p = wx && wx.probe, parts = [];
+			parts.push(_('ISP gateway: %s').format(wx && wx.gateway ? '<code>' + wx.gateway + '</code>' : _('not detected')));
+			if (p && p.target)
+				parts.push(_('1-second probe: %s (%s)').format('<code>' + p.target + '</code>', p.why) +
+					(p.tried && p.tried.length ? ' <span style="opacity:.7">' + _('tried: %s').format(p.tried.join(', ')) + '</span>' : ''));
+			return parts.join('<br>');
+		};
+
 		o = s.option(form.Flag, 'trace_on_loss', _('Traceroute during packet loss'),
 			_('Saves a traceroute to the first ping target when packets are lost (at most every 15 minutes). Shown on the report.'));
 		o.default = '1';
@@ -306,6 +320,34 @@ return view.extend({
 		o.value('C', '°C');
 		o.value('F', '°F');
 		o.default = 'C';
+
+		var wxText = function(w) {
+			if (!w || !w.configured) return _('No location set yet. Enter a latitude and longitude, then Save & Apply.');
+			var t = w.ts ? new Date(w.ts * 1000).toLocaleString() : null;
+			var html = (w.temp != null)
+				? '<strong>%s°%s</strong> · %s'.format(w.temp, w.unit, _('precipitation %s %s').format(w.precip != null ? w.precip : '–', w.unit === 'F' ? 'in' : 'mm')) +
+				  ' <span style="opacity:.7">(' + _('fetched %s; Open-Meteo observation %s').format(t, (w.obs || '').replace('T', ' ')) + ')</span>'
+				: _('No reading yet.');
+			if (w.error) html += '<br><span style="color:#c42b2b">' + _('Last attempt failed: %s').format(w.error) + '</span>';
+			return html;
+		};
+		o = s.option(form.DummyValue, '_weather', _('Latest reading'),
+			_('Fetched with each sample, at most every 30 minutes. "Fetch now" uses the saved location, so Save & Apply after changing it.'));
+		o.rawhtml = true;
+		o.cfgvalue = function() { return '<span id="mm-wx">' + wxText(wx) + '</span>'; };
+
+		o = s.option(form.Button, '_weather_now', ' ');
+		o.inputtitle = _('Fetch now');
+		o.inputstyle = 'action';
+		o.onclick = function() {
+			var el = document.getElementById('mm-wx');
+			if (el) el.textContent = _('Fetching…');
+			return fs.exec('/usr/bin/modem-monitor', [ 'weather', '--fetch', '--json' ]).then(function(r) {
+				var w = null;
+				try { w = JSON.parse(r.stdout || 'null'); } catch (e) {}
+				if (el) el.innerHTML = w ? wxText(w) : _('No answer from the monitor.');
+			});
+		};
 
 		s = m.section(form.NamedSection, 'main', 'modem_monitor', _('Outage credits'),
 			_('Totals outages per month on the report (leaving out planned work) and drafts a credit-request letter from the Cable Modem page.'));
