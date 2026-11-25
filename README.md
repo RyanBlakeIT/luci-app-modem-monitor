@@ -32,10 +32,10 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 Download the latest `.apk` from [Releases](https://github.com/RyanBlakeIT/luci-app-modem-monitor/releases), then:
 
 ```sh
-scp -O luci-app-modem-monitor-1.1.2-r1.apk root@192.168.1.1:/tmp/
+scp -O luci-app-modem-monitor-1.1.3-r1.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1
 apk update
-apk add --allow-untrusted /tmp/luci-app-modem-monitor-1.1.2-r1.apk
+apk add --allow-untrusted /tmp/luci-app-modem-monitor-1.1.3-r1.apk
 ```
 
 The package is not signed by OpenWrt, so `--allow-untrusted` is needed.

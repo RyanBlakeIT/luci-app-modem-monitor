@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.3
+- Event log timestamps follow the modem's clock display. After a reboot the S33 can briefly show its log in UTC (startup entries as 1/1/1970 00:00 instead of 31/12/1969 19:00) before it gets its time zone. The monitor now reads `CustomerCurSystemTime` every sample to know which is in effect, and identifies log entries by their real time, so a re-rendered log is no longer stored a second time, hours late.
+- One-time repair of `events.csv`: re-times startup entries and removes UTC copies of entries already stored.
+- "Show data since" identifies entries by number, so two entries that settle at the same time no longer get mixed up in the dropdown.
+- `system.txt` shows whether the modem clock displays local time or UTC.
+
 ## 1.1.2
 - "Show data since" for entries without an end time now starts at the first two clean samples afterwards (modem reachable, no reboot or re-registration, no packet loss). For a modem reboot it starts after the sample that sees the reboot. The disruption of the work itself is no longer counted, and the banner shows the exact start time.
 - Releases are created automatically by GitHub Actions when `VERSION` changes on `main`.

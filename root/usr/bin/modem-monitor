@@ -40,7 +40,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -408,6 +408,24 @@ def boot_offset(ev):
         return None
     if t.year >= 2020:
         return None
+    # The modem shows its clock-not-set epoch either in local time
+    # (31/12/1969 19:00 in US Eastern) or in UTC (1/1/1970 00:00), and can switch
+    # after a reboot. Use whichever reading gives the smallest offset.
+    return _boot_offset_from(t)
+
+
+def _boot_offset_from(t):
+    offs = [int((t - base).total_seconds()) for base in (
+        datetime(1970, 1, 1, 0, 0, 0) - timedelta(seconds=_utc_offset()),  # local rendering
+        datetime(1970, 1, 1, 0, 0, 0),                                      # UTC rendering
+        datetime(1969, 12, 31, 19, 0, 0))]                                  # US Eastern
+    offs = [o for o in offs if 0 <= o < 7 * 86400]
+    return min(offs) if offs else 0
+
+
+def _old_boot_offset(ev):
+    """The pre-1.1.3 calculation, used to repair timestamps it produced."""
+    t = _parse_dt(ev)
     for base in (datetime(1969, 12, 31, 19, 0, 0), datetime(1970, 1, 1, 0, 0, 0)):
         off = (t - base).total_seconds()
         if 0 <= off < 7 * 86400:
@@ -415,28 +433,115 @@ def boot_offset(ev):
     return 0
 
 
-def event_ts(ev, fallback, boot_ts=None):
-    """Modem log date is D/M/YYYY. Entries from before the modem's clock was
+def _utc_offset():
+    """Router's current offset from UTC in seconds (e.g. -18000 for EST)."""
+    return time.localtime().tm_gmtoff or 0
+
+
+MODEM_TIME_FORMATS = ("%a %b %d %H:%M:%S %Y", "%a %b %d %H:%M:%S %Z %Y", "%Y-%m-%d %H:%M:%S",
+                      "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S", "%Y/%m/%d %H:%M:%S",
+                      "%a, %d %b %Y %H:%M:%S", "%d %b %Y %H:%M:%S")
+
+
+def _try_ts(ev):
+    try:
+        return _parse_dt(ev).timestamp()
+    except (ValueError, KeyError):
+        return 0
+
+
+def modem_clock_offset(conninfo, now):
+    """Seconds the modem's displayed clock runs ahead of the router's local
+    clock (0 = local time, +18000 = UTC while the router is on EST), rounded to
+    15 minutes. None if the modem doesn't report a readable time."""
+    for k, v in (conninfo or {}).items():
+        if not isinstance(v, str) or "time" not in k.lower() or "up" in k.lower():
+            continue
+        txt = " ".join(v.replace("\xa0", " ").split())
+        for f in MODEM_TIME_FORMATS:
+            try:
+                t = datetime.strptime(txt, f)
+            except ValueError:
+                continue
+            if t.year < 2020:
+                return None  # clock not set yet
+            off = time.mktime(t.timetuple()) - now
+            off = int(round(off / 900.0) * 900)
+            return off if abs(off) <= 14 * 3600 else None
+    return None
+
+
+def event_ts(ev, fallback, boot_ts=None, clock_offset=0):
+    """Modem log date is D/M/YYYY in the modem's display clock, which may be
+    local time or UTC (clock_offset). Entries from before the modem's clock was
     set are placed at boot time + offset (boot time comes from uptime)."""
     off = boot_offset(ev)
     if off is not None:
         return int(boot_ts + off) if boot_ts else int(fallback)
     try:
-        t = _parse_dt(ev)
-        if t.timestamp() <= fallback + 86400:
-            return int(t.timestamp())
+        t = _parse_dt(ev).timestamp() - (clock_offset or 0)
+        return int(min(t, fallback))
     except (ValueError, KeyError):
-        pass
-    return int(fallback)
+        return int(fallback)
 
 
-def event_key(ev, boot_ts):
-    # Pre-clock entries repeat with identical text/offset on every boot,
-    # so they're keyed per boot.
-    k = "%s|%s|%s" % (ev["date"], ev["time"], ev["msg"])
-    if boot_offset(ev) is not None and boot_ts:
-        k = "boot%d|%s" % (boot_ts, k)
-    return k
+def event_key(ev, boot_ts, clock_offset=0, fallback=0):
+    """Identify an entry by its real moment + message, so the same entry shown
+    in a different clock format (local vs UTC) isn't stored twice."""
+    return "%d|%s" % (event_ts(ev, fallback, boot_ts, clock_offset), ev["msg"])
+
+
+def migrate_113(cfg, st, clock_offset):
+    """Repair events.csv written before 1.1.3: pre-clock entries shown as
+    1/1/1970 were placed hours late, and entries re-rendered in UTC after a
+    modem reboot were stored twice. Re-key the seen-list by real time."""
+    if st.get("migrated_113"):
+        return
+    path = os.path.join(cfg["data_dir"], "events.csv")
+    rows = []
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            rows = list(csv.DictReader(f))
+    now = time.time()
+    utc_shift = -_utc_offset()  # how far a UTC rendering runs ahead of local
+    for r in rows:
+        ev = {"date": r.get("modem_date", ""), "time": r.get("modem_time", ""), "msg": r.get("message", "")}
+        try:
+            t = _parse_dt(ev)
+        except (ValueError, KeyError):
+            continue
+        ts = int(r["ts"])
+        if t.year < 2020:
+            ts = ts - _old_boot_offset(ev) + _boot_offset_from(t)
+        elif ts > now + 600:
+            ts -= clock_offset if clock_offset else utc_shift  # future = UTC-rendered
+        r["ts"] = ts
+        r["type"] = classify(ev["msg"])
+    # Drop UTC re-renderings of entries already stored in local time, then exact duplicates
+    have = {(int(r["ts"]), r["message"]) for r in rows}
+    keep, seen = [], set()
+    for r in sorted(rows, key=lambda x: int(x["ts"])):
+        ts, msg = int(r["ts"]), r["message"]
+        dated = not r.get("modem_date", "").endswith(("1969", "1970"))
+        if dated and utc_shift and any((ts - utc_shift + d, msg) in have for d in (-2, -1, 0, 1, 2)):
+            continue
+        if (ts, msg) in seen:
+            continue
+        seen.add((ts, msg))
+        r["time"] = _fmt(ts)
+        keep.append(r)
+    if rows:
+        tmp = path + ".tmp"
+        with open(tmp, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=EVENT_COLS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(keep)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+        log("repaired event log: %d entries kept, %d duplicates or mis-timed copies removed"
+            % (len(keep), len(rows) - len(keep)))
+    st["seen_events"] = ["%d|%s" % (int(r["ts"]), r["message"]) for r in keep][-3000:]
+    st["migrated_113"] = 1
 
 
 def migrate_102(cfg, st, boot_ts):
@@ -857,6 +962,9 @@ def poll(cfg):
         us = parse_upstream(resp.get("GetCustomerStatusUpstreamChannelInfoResponse", {})
                             .get("CustomerConnUpstreamChannel"))
         uptime = parse_uptime(resp.get("GetCustomerStatusConnectionInfoResponse"))
+        co = modem_clock_offset(resp.get("GetCustomerStatusConnectionInfoResponse"), now)
+        if co is not None:
+            st["clock_offset"] = co
         if not ds and not us:
             raise ModemError("modem returned no channel data")
         row["ok"] = 1
@@ -925,15 +1033,22 @@ def poll(cfg):
         # Event log (separate request; some firmware may not support it)
         try:
             lr = modem.call(["GetCustomerStatusLog"]).get("GetCustomerStatusLogResponse", {})
+            evs = parse_events(lr)
+            clock = st.get("clock_offset")
+            if clock is None:
+                # No readable modem clock: dated entries "in the future" mean UTC display.
+                fut = [e for e in evs if boot_offset(e) is None and _try_ts(e) > now + 600]
+                clock = -_utc_offset() if fut else 0
+            migrate_113(cfg, st, clock)
             seen = st.get("seen_events", [])
             seen_set = set(seen)
-            for ev in parse_events(lr):
-                key = event_key(ev, boot_ts)
+            for ev in evs:
+                key = event_key(ev, boot_ts, clock, now)
                 if key in seen_set:
                     continue
                 seen_set.add(key)
                 seen.append(key)
-                ets = event_ts(ev, now, boot_ts)
+                ets = event_ts(ev, now, boot_ts, clock)
                 events_new.append({"ts": ets, "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ets)),
                                    "modem_date": ev["date"], "modem_time": ev["time"], "prio": ev["prio"],
                                    "type": classify(ev["msg"]), "message": ev["msg"]})
@@ -1384,7 +1499,8 @@ if(!D.ranges[R])R="7d";
 const ls=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}};
 const startOfEntry=m=>m.since||m.end||m.ts;
 const hm=t=>new Date(t*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
-let SINCE=+(ls("mm-since")||0);if(SINCE&&!(D.maint||[]).some(m=>startOfEntry(m)===SINCE))SINCE=0;
+let SID=ls("mm-since-id")||"";const ENT=()=>(D.maint||[]).find(m=>String(m.id)===SID);if(!ENT())SID="";
+let SINCE=ENT()?startOfEntry(ENT()):0;
 {const t=D.title||("Cable modem signal report"+(D.isp?" \u2013 "+D.isp:""));document.title=t;$("#h1").textContent=t;
  if(D.note){const n=document.createElement("div");n.className="sub";n.style.marginBottom="2px";n.textContent=D.note;$("#h1").after(n)}}
 (()=>{const L=D.latest||{},mins=v=>Math.round(v/60),fmt=t=>new Date(t*1000).toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
@@ -1461,11 +1577,11 @@ function tiles(rg){const t=count(Math.max(D.now-rg.span,SINCE||0)),u=T.us_power_
  if((D.lk||[]).length&&t.missed)items.push(["Router NIC missed packets",t.missed.toLocaleString(),t.missed_flag?"over 100 in one sample: router tuning":"receive-buffer overruns",t.missed_flag]);
  $("#tiles").innerHTML=items.map(i=>"<div class='tile"+(i[3]?" bad":"")+"'><div class=k>"+esc(i[0])+"</div><div class=v>"+esc(i[1])+"</div><div class=n>"+esc(i[2])+"</div></div>").join("")}
 function sinceUI(){const M=(D.maint||[]).slice().reverse();
- $("#since").innerHTML="<option value='0'>All data</option>"+M.map(m=>"<option value='"+startOfEntry(m)+"'"+(startOfEntry(m)===SINCE?" selected":"")+">after #"+m.n+" "+esc(m.type)+" \u2013 "+esc(m.note.length>48?m.note.slice(0,48)+"\u2026":m.note)+" ("+esc((m.end_time||m.time).slice(5,16))+")</option>").join("");
- const b=$("#sinceBanner"),m=M.find(x=>startOfEntry(x)===SINCE);
+ $("#since").innerHTML="<option value=''>All data</option>"+M.map(m=>"<option value='"+esc(m.id)+"'"+(String(m.id)===SID?" selected":"")+">after #"+m.n+" "+esc(m.type)+" \u2013 "+esc(m.note.length>48?m.note.slice(0,48)+"\u2026":m.note)+" ("+esc((m.end_time||m.time).slice(5,16))+")</option>").join("");
+ const b=$("#sinceBanner"),m=ENT();
  if(m){b.style.display="block";b.innerHTML="Showing only data after <b>#"+m.n+" "+esc(m.type)+"</b> ("+esc(m.end_time||m.time)+"): "+esc(m.note)+". Counts, charts and tables start at <b>"+hm(SINCE)+"</b>"+(m.end?" (when it ended)":(SINCE>m.ts?" (the first clean samples after it, so the "+(m.type==="modem-reboot"?"reboot":"work")+" itself isn\u2019t counted)":""))+". <a id=sinceClear>Show all data</a>";$("#sinceClear").onclick=()=>setSince(0)}
  else{b.style.display="none";b.innerHTML=""}}
-function setSince(v){SINCE=+v||0;ls("mm-since",String(SINCE));sinceUI();render();tables()}
+function setSince(id){SID=String(id||"");ls("mm-since-id",SID);SINCE=ENT()?startOfEntry(ENT()):0;sinceUI();render();tables()}
 function render(){const rg=D.ranges[R];$("#rng").innerHTML=Object.keys(D.ranges).map(k=>"<button aria-pressed="+(k===R)+" data-r="+k+">"+k+"</button>").join("");
  tiles(rg);const g=$("#charts");g.innerHTML="";
  const mk=(D.maint||[]).filter(m=>(m.end||m.ts)>=Math.max(D.now-rg.span,SINCE||0)).length;$("#mk").textContent=mk?"Dashed lines on the charts mark "+mk+" maintenance log entr"+(mk===1?"y":"ies")+" (numbers match the Maintenance log below). Hover a chart for details.":"";
@@ -1485,9 +1601,9 @@ function tables(){const lo=SINCE||0,DL=D.daylist||[],K=DL.map(()=>({T3:0,T4:0,SY
  const inc=D.incidents.filter(i=>i.ts>=lo),ev=D.events.filter(e=>e.ts>=lo);
  $("#inc").innerHTML=inc.length?"<tr><th>Start</th><th>End</th><th class=num>About (min)</th><th>What happened</th></tr>"+inc.map(i=>"<tr><td>"+i.start+"</td><td>"+i.end+"</td><td class=num>"+(i.mins||"\u2013")+"</td><td>"+esc(i.why)+"</td></tr>").join(""):"<tr><td class=empty>No incidents recorded"+(lo?" since the selected entry":"")+".</td></tr>";
  $("#ev").innerHTML=ev.length?"<tr><th>Time</th><th>Type</th><th>Message</th></tr>"+ev.map(e=>"<tr><td>"+e.time+"</td><td"+((e.type==="T3"||e.type==="T4"||e.type==="PROVISION")?" class=flag":"")+">"+esc(e.type)+"</td><td>"+esc(e.msg)+"</td></tr>").join(""):"<tr><td class=empty>No event log entries"+(lo?" since the selected entry":" collected yet")+".</td></tr>";
- $("#maint").querySelectorAll("tr[data-s]").forEach(r=>r.classList.toggle("sel",+r.dataset.s===lo))}
+ $("#maint").querySelectorAll("tr[data-s]").forEach(r=>r.classList.toggle("sel",r.dataset.s===SID))}
 const ba=w=>{if(!w)return"<span class=ba>\u2013</span>";const r=a=>a&&a[0]!=null?a[0]+".."+a[1]:"?";return"<span class=ba>DS "+r(w.ds)+" \u00b7 US "+r(w.us)+" dBmV<br>"+(w.uncorr_day==null?"\u2013":w.uncorr_day.toLocaleString())+" uncorr/day \u00b7 "+w.t3t4+" T3/T4 \u00b7 "+w.drw+" DRW"+(w.hours<23?" ("+w.hours+" h)":"")+"</span>"};
-$("#maint").innerHTML=(D.maint||[]).length?"<tr><th>#</th><th>When</th><th>Type</th><th>What happened</th><th>24 h before</th><th>24 h after</th></tr>"+D.maint.slice().reverse().map(m=>"<tr data-s='"+startOfEntry(m)+"'><td class=num>"+m.n+"</td><td>"+m.time+(m.end_time?" to "+(m.end_time.slice(0,10)===m.time.slice(0,10)?m.end_time.slice(11):m.end_time):"")+"</td><td>"+esc(m.type)+(m.status==="suggested"?" <span class=badge>suggested</span>":"")+"</td><td>"+esc(m.note)+" <a class=sl data-s='"+startOfEntry(m)+"'>show data after this</a></td><td>"+ba(m.before)+"</td><td>"+ba(m.after)+"</td></tr>").join(""):"<tr><td class=empty>No maintenance entries yet.</td></tr>";
+$("#maint").innerHTML=(D.maint||[]).length?"<tr><th>#</th><th>When</th><th>Type</th><th>What happened</th><th>24 h before</th><th>24 h after</th></tr>"+D.maint.slice().reverse().map(m=>"<tr data-s='"+esc(m.id)+"'><td class=num>"+m.n+"</td><td>"+m.time+(m.end_time?" to "+(m.end_time.slice(0,10)===m.time.slice(0,10)?m.end_time.slice(11):m.end_time):"")+"</td><td>"+esc(m.type)+(m.status==="suggested"?" <span class=badge>suggested</span>":"")+"</td><td>"+esc(m.note)+" <a class=sl data-s='"+esc(m.id)+"'>show data after this</a></td><td>"+ba(m.before)+"</td><td>"+ba(m.after)+"</td></tr>").join(""):"<tr><td class=empty>No maintenance entries yet.</td></tr>";
 $("#maint").addEventListener("click",e=>{const a=e.target.closest("a.sl");if(a){setSince(a.dataset.s);window.scrollTo({top:0,behavior:"smooth"})}});
 tables();
 $("#files").innerHTML=D.files.length?"<ul>"+D.files.map(f=>"<li><a href='data/"+encodeURIComponent(f.name)+"' download>"+esc(f.name)+"</a> <span class=sub>("+f.kb+" KB)</span></li>").join("")+"</ul>":"<div class=empty>No data files yet.</div>";
@@ -1711,6 +1827,8 @@ def system_report(cfg):
         ("Uptime", _run(["uptime"])),
         ("Settings (uci, password removed)", uci),
         ("Monitor state (session keys removed)", json.dumps(safe_state, indent=1, sort_keys=True)),
+        ("Modem clock", "displays %s (offset %+d s vs router)" % (
+            "local time" if not st.get("clock_offset") else "UTC or another zone", st.get("clock_offset") or 0)),
         ("Modem", "model %s, firmware %s, hardware %s (read %s)" % (
             mi.get("model", "?"), mi.get("firmware", "?"), mi.get("hardware", "?"), _fmt(mi["ts"]) if mi.get("ts") else "never")),
         ("WAN device", dev),
