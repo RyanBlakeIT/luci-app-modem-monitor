@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+- The install-update dialog leads with a plain result ("Version X is installed", and whether the package signature was required) in normal-size text. The raw log is in a collapsible section in larger type, opened automatically if something failed.
+- Upgrades no longer leave `/etc/config/modem_monitor.apk-new` behind. Your settings are kept as before; new options take their defaults from the program.
+
 ## 1.4.0
 - **Signed releases:** packages are signed in CI with the project key, and the public key ships in the package (`/etc/apk/keys/luci-app-modem-monitor.pem`) and with each release. Once 1.4.0 is installed, in-browser updates install without `--allow-untrusted`, and apk refuses any update without a valid signature from that key, on top of the SHA-256 check.
 - **More modems:** a driver layer with auto-detection, set under **Settings → Modem type**:

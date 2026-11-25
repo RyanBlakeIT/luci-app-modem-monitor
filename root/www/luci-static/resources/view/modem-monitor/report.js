@@ -205,12 +205,25 @@ return view.extend({
 	},
 
 	installUpdate: function(u) {
-		var logEl = E('pre', { 'style': 'white-space:pre-wrap;max-height:40vh;overflow:auto;font-size:12px' }, _('Downloading…'));
-		ui.showModal(_('Installing version %s').format(u.latest), [ E('p', { 'class': 'spinning' }, _('Please keep this page open.')), logEl ]);
+		var LOG = 'white-space:pre-wrap;max-height:40vh;overflow:auto;font-size:13.5px;line-height:1.5';
+		var logEl = E('pre', { 'style': LOG }, _('Downloading…'));
+		ui.showModal(_('Installing version %s').format(u.latest), [
+			E('p', { 'class': 'spinning', 'style': 'font-size:15px' }, _('Downloading, verifying and installing. Please keep this page open; it takes about half a minute.')),
+			E('details', {}, [ E('summary', { 'style': 'cursor:pointer;font-size:14px' }, _('Show progress')), logEl ])
+		]);
 		var finish = function(ok, text) {
 			ui.showModal(ok ? _('Update installed') : _('Update failed'), [
-				E('pre', { 'style': 'white-space:pre-wrap;max-height:45vh;overflow:auto;font-size:12px' }, text),
-				E('p', {}, ok ? _('Reload the page to use the new version. If a tab looks out of date, log out of LuCI and back in.') : _('Nothing was changed if the download was refused. You can also install manually from the release page.')),
+				E('p', { 'style': 'font-size:16px;margin:4px 0 10px' }, ok
+					? E('strong', {}, _('Version %s is installed.').format(u.latest))
+					: E('strong', {}, _('The update was not installed.'))),
+				E('p', { 'style': 'font-size:14px' }, ok
+					? (/signature required/.test(text) ? _('The download matched GitHub\'s published checksum and carried a valid project signature. ') : _('The download matched GitHub\'s published checksum. ')) +
+					  _('Your settings and data are unchanged. Reload the page to use the new version; if a tab looks out of date, log out of LuCI and back in.')
+					: _('Nothing was changed if the download or signature check failed. The log below says why. You can also install manually from the release page.')),
+				E('details', ok ? {} : { 'open': 'open' }, [
+					E('summary', { 'style': 'cursor:pointer;font-size:14px' }, _('Installation log')),
+					E('pre', { 'style': LOG }, text)
+				]),
 				E('div', { 'class': 'right' }, ok
 					? E('button', { 'class': 'btn cbi-button-positive', 'click': function() { location.reload(); } }, _('Reload'))
 					: E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Close')))

@@ -50,7 +50,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -3387,6 +3387,7 @@ def update_install(cfg):
     # every later update must carry a valid signature from the same key.
     if tool == "apk":
         trust = "" if os.path.exists(APK_KEY) else "--allow-untrusted "
+        check += "; package signature required" if not trust else "; unsigned install (first signed release)"
         cmd = "apk add %s'%s'" % (trust, path)
     else:
         cmd = "opkg install '%s'" % path
