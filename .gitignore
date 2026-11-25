@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 root/lib/apk/
 root/etc/apk/
+build/

@@ -12,9 +12,22 @@ RELEASE=${RELEASE:-1}
 VERSION=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' root/usr/bin/modem-monitor)
 VER="$VERSION-r$RELEASE"
 find root -name __pycache__ -prune -exec rm -rf {} +
-mkdir -p root/lib/apk/packages
-echo /etc/config/modem_monitor > root/lib/apk/packages/luci-app-modem-monitor.conffiles
-(cd root && find . -type f -o -type l | sed 's#^\.##' | grep -v '^/lib/apk/' | sort) > root/lib/apk/packages/luci-app-modem-monitor.list
+# Stage a copy of root/. The LuCI views go into a folder named after the
+# version and the menu points there, so browsers can never run a cached page
+# script from an older release (LuCI's own cache key doesn't change with ours).
+VT="v$(echo "$VERSION" | tr '.' '_')"
+STAGE=build/root
+rm -rf build && mkdir -p build && cp -a root "$STAGE"
+VIEWS="$STAGE/www/luci-static/resources/view/modem-monitor"
+mkdir -p "$VIEWS/$VT"
+for f in "$VIEWS"/*.js; do mv "$f" "$VIEWS/$VT/"; done
+sed -i "s#\"modem-monitor/\(report\|maintenance\|settings\)\"#\"modem-monitor/$VT/\1\"#" \
+	"$STAGE/usr/share/luci/menu.d/luci-app-modem-monitor.json"
+grep -q "modem-monitor/$VT/report" "$STAGE/usr/share/luci/menu.d/luci-app-modem-monitor.json"
+rm -rf "$STAGE/lib/apk"
+mkdir -p "$STAGE/lib/apk/packages"
+echo /etc/config/modem_monitor > "$STAGE/lib/apk/packages/luci-app-modem-monitor.conffiles"
+(cd "$STAGE" && find . -type f -o -type l | sed 's#^\.##' | grep -v '^/lib/apk/' | sort) > "$STAGE/lib/apk/packages/luci-app-modem-monitor.list"
 mkdir -p out
 SIGN=""
 [ -n "$SIGN_KEY" ] && SIGN="--sign-key $SIGN_KEY"
@@ -27,5 +40,5 @@ $APK mkpkg $SIGN \
  --info "depends:python3 luci-base rpcd-mod-file ca-bundle" \
  --script "post-install:scripts/post-install" --script "post-upgrade:scripts/post-upgrade" \
  --script "pre-deinstall:scripts/pre-deinstall" --script "post-deinstall:scripts/post-deinstall" \
- --files root --output "out/luci-app-modem-monitor-$VER.apk"
+ --files "$STAGE" --output "out/luci-app-modem-monitor-$VER.apk"
 echo "built out/luci-app-modem-monitor-$VER.apk"

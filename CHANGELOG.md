@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.6.3
+- **No more stale pages after an update.** LuCI's page scripts are installed in a folder named after the release (`view/modem-monitor/v1_6_3/`), and the menu points there. The browser can't keep running an old cached script after an upgrade; previously this could take a cache-clearing reload, as with the 1.6.2 Settings tabs.
+
 ## 1.6.2
 - **Settings in tabs:** one tab per area (Modem, Alerts, Line quality, Network & weather, Outage credits, Speed tests, Backup, Integrations, Storage & pings, Guideline ranges, Updates) instead of one long page. The page reopens on the tab you last used, and Save & Apply covers all tabs.
 - The installed version and update status are shown at the top of the page on every tab. **Test connection** moved into the Modem tab.
