@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.2.1
+- **What's new** dialog shows the release notes as formatted text (bullets, bold) at normal size, instead of a small fixed-width block.
+
 ## 1.2.0
 - **Alerts:** ntfy (just enter a topic name), Pushover, Telegram, JSON webhook or email. They cover:
   - modem unreachable, and back online

@@ -18,6 +18,40 @@ function reloadFrame() {
 
 
 
+/* Release notes are Markdown: render bullets, bold and `code` as readable text. */
+function notesNode(md) {
+	var box = E('div', { 'style': 'max-height:50vh;overflow:auto;font-size:14px;line-height:1.5;padding:4px 8px;border:1px solid rgba(128,128,128,.3);border-radius:6px' });
+	if (!md) { box.appendChild(E('p', {}, _('No release notes.'))); return box; }
+	var inline = function(t) {
+		var esc = t.replace(/[&<>"]/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; });
+		return esc.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>');
+	};
+	var top = null, sub = null, lastLi = null;
+	String(md).replace(/\r/g, '').split('\n').forEach(function(line) {
+		var m = line.match(/^(\s*)[-*] (.*)$/);
+		if (m && m[1].length >= 2) {
+			if (!lastLi) { top = top || box.appendChild(E('ul', { 'style': 'margin:4px 0;padding-left:20px' })); lastLi = top.appendChild(E('li', {})); }
+			if (!sub) sub = lastLi.appendChild(E('ul', { 'style': 'margin:2px 0;padding-left:18px' }));
+			sub.appendChild(E('li', {})).innerHTML = inline(m[2]);
+		} else if (m) {
+			top = top || box.appendChild(E('ul', { 'style': 'margin:4px 0;padding-left:20px' }));
+			lastLi = top.appendChild(E('li', { 'style': 'margin:4px 0' }));
+			lastLi.innerHTML = inline(m[2]);
+			sub = null;
+		} else if (/^\s+\S/.test(line) && lastLi) {
+			lastLi.appendChild(E('div', {})).innerHTML = inline(line.trim());
+			sub = null;
+		} else if (/^#+\s/.test(line)) {
+			box.appendChild(E('h4', {})).innerHTML = inline(line.replace(/^#+\s/, ''));
+			top = sub = lastLi = null;
+		} else if (line.trim()) {
+			box.appendChild(E('p', { 'style': 'margin:4px 0' })).innerHTML = inline(line.trim());
+			top = sub = lastLi = null;
+		}
+	});
+	return box;
+}
+
 function exec(args) {
 	return fs.exec(BIN, args).then(function(res) {
 		var out = ((res.stdout || '') + (res.stderr || '')).trim();
@@ -153,7 +187,7 @@ return view.extend({
 		var self = this;
 		var body = [
 			E('p', {}, _('Version %s (installed: %s). ').format(u.latest, u.current)),
-			E('pre', { 'style': 'white-space:pre-wrap;max-height:45vh;overflow:auto;font-size:12px' }, u.notes || _('No release notes.')),
+			notesNode(u.notes),
 			E('p', {}, E('a', { 'href': u.url, 'target': '_blank', 'rel': 'noopener' }, _('Open the release on GitHub')))
 		];
 		if (install)
