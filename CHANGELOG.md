@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.6.9
+- The Status → Overview tile's script is also installed under a versioned file name, so the browser shows the new tile right after an update instead of a cached old one.
+
 ## 1.6.8
 - **Redesigned Status → Overview tile:**
   - a status pill: green **Online**, amber **problems today** or **channels missing**, red **unreachable**

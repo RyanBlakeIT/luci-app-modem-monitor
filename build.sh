@@ -21,6 +21,9 @@ rm -rf build && mkdir -p build && cp -a root "$STAGE"
 VIEWS="$STAGE/www/luci-static/resources/view/modem-monitor"
 mkdir -p "$VIEWS/$VT"
 for f in "$VIEWS"/*.js; do mv "$f" "$VIEWS/$VT/"; done
+# the Status > Overview tile is found by file name, so version that too
+INC="$STAGE/www/luci-static/resources/view/status/include"
+[ -f "$INC/70_modem_monitor.js" ] && mv "$INC/70_modem_monitor.js" "$INC/70_modem_monitor_$VT.js"
 sed -i "s#\"modem-monitor/\(report\|maintenance\|settings\)\"#\"modem-monitor/$VT/\1\"#" \
 	"$STAGE/usr/share/luci/menu.d/luci-app-modem-monitor.json"
 grep -q "modem-monitor/$VT/report" "$STAGE/usr/share/luci/menu.d/luci-app-modem-monitor.json"
