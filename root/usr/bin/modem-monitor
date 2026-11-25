@@ -150,10 +150,14 @@ DEFAULTS = {
 LOGIN_BACKOFF_S = 1800  # after a failed login, wait 30 min (avoid modem lockout)
 
 
+LOG_STDERR = "--json" in sys.argv  # keep stdout clean for machine-readable output
+
+
 def log(msg):
     # stdout -> daemon.info under procd (stderr would show as daemon.err)
-    sys.stdout.write("modem-monitor: %s\n" % msg)
-    sys.stdout.flush()
+    out = sys.stderr if LOG_STDERR else sys.stdout
+    out.write("modem-monitor: %s\n" % msg)
+    out.flush()
 
 
 # --------------------------------------------------------------------------
@@ -190,10 +194,13 @@ def load_config():
 
 
 def fnum(cfg, key):
-    try:
-        return float(cfg.get(key, DEFAULTS.get(key, "0")))
-    except ValueError:
-        return float(DEFAULTS.get(key, "0"))
+    """Numeric setting; empty or invalid values fall back to the default, or 0."""
+    for v in (cfg.get(key), DEFAULTS.get(key)):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
 
 
 # --------------------------------------------------------------------------
