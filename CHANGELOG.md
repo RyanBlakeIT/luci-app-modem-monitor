@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.5
+- **Speed test fixes:** the server's answer is now checked. A refused or empty download used to be recorded as "0 Mb/s"; now its reason (HTTP status) appears on the report, and the other direction still runs. Requests identify themselves with a browser-style User-Agent, and a direction that moves under 1 MB counts as failed rather than as a speed.
+- The plan-speed fields only accept 1-10,000 Mb/s, and the report ignores larger values, so a number in the wrong unit (e.g. 50000) no longer flattens the chart.
+
 ## 1.6.4
 - **Settings → Network & weather shows the latest weather reading:** temperature, precipitation, when it was fetched, and Open-Meteo's observation time. A failed fetch shows its reason. **Fetch now** gets a fresh reading for the saved location.
 - The same tab shows what's **in use now**: the detected ISP gateway, and the 1-second probe's target with the reason it was chosen and the hops it tried.

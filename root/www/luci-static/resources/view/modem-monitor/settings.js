@@ -389,10 +389,12 @@ return view.extend({
 		o.placeholder = '250';
 		o.depends('speedtest_enabled', '1');
 
-		o = s.option(form.Value, 'plan_down', _('Plan download (Mb/s)'), _('Optional. Shown on the chart; the complaint summary counts tests below 80% of it.'));
-		o.datatype = 'ufloat';
-		o = s.option(form.Value, 'plan_up', _('Plan upload (Mb/s)'));
-		o.datatype = 'ufloat';
+		o = s.option(form.Value, 'plan_down', _('Plan download (Mb/s)'), _('Optional, in megabits per second (e.g. 1000 for a gigabit plan). Shown on the chart; the complaint summary counts tests below 80% of it.'));
+		o.datatype = 'range(1,10000)';
+		o.placeholder = '1000';
+		o = s.option(form.Value, 'plan_up', _('Plan upload (Mb/s)'), _('In megabits per second, e.g. 50.'));
+		o.datatype = 'range(1,10000)';
+		o.placeholder = '50';
 
 		o = s.option(form.Value, 'speedtest_url', _('Server'), _('Any server with Cloudflare-style /__down and /__up endpoints.'));
 		o.placeholder = 'https://speed.cloudflare.com';

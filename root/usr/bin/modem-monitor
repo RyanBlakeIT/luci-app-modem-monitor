@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.6.4"
+VERSION = "1.6.5"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1931,7 +1931,8 @@ def build_report(cfg):
     sp = read_csvs([os.path.join(cfg["data_dir"], "speedtest.csv")], now - 90 * 86400)
     data["speed"] = [[int(r["ts"]), fv(r, "down_mbps"), fv(r, "up_mbps"), fv(r, "idle_ms"), fv(r, "loaded_ms"), r.get("error", "")]
                      for r in sp]
-    data["plan"] = [fnum(cfg, "plan_down") or None, fnum(cfg, "plan_up") or None]
+    # plan speeds are Mb/s; ignore values that can't be (e.g. kb/s typed by mistake)
+    data["plan"] = [v if v and v <= 10000 else None for v in (fnum(cfg, "plan_down"), fnum(cfg, "plan_up"))]
     try:
         data["credit"] = credit_months(cfg) if cfg.get("credit_enabled", "1") == "1" else None
     except Exception as e:
@@ -3540,12 +3541,15 @@ def _speed_dir(url, seconds, max_bytes, streams, upload=False):
                                                context=ssl.create_default_context(cafile=cafile))
         return http.client.HTTPConnection(u.hostname, u.port or 80, timeout=15)
 
+    ua = "Mozilla/5.0 (compatible; luci-app-modem-monitor/%s)" % VERSION
+
     def worker():
         got = 0
         try:
             c = conn()
             if upload:
-                c.putrequest("POST", (u.path or "/") + "/__up")
+                c.putrequest("POST", (u.path.rstrip("/") or "") + "/__up")
+                c.putheader("User-Agent", ua)
                 c.putheader("Content-Type", "application/octet-stream")
                 c.putheader("Content-Length", str(per))
                 c.endheaders()
@@ -3557,10 +3561,17 @@ def _speed_dir(url, seconds, max_bytes, streams, upload=False):
                     with lock:
                         total[0] += n
                 if got >= per:
-                    c.getresponse().read()
+                    r = c.getresponse()
+                    r.read()
+                    if r.status >= 400:
+                        errs.append("upload refused: HTTP %d %s" % (r.status, r.reason))
             else:
-                c.request("GET", "%s/__down?bytes=%d" % (u.path or "", per))
+                c.request("GET", "%s/__down?bytes=%d" % (u.path.rstrip("/") or "", per),
+                          headers={"User-Agent": ua, "Accept": "*/*"})
                 r = c.getresponse()
+                if r.status != 200:
+                    body = r.read(300).decode("utf-8", "replace")
+                    raise ModemError("download refused: HTTP %d %s %s" % (r.status, r.reason, " ".join(body.split())[:120]))
                 while time.monotonic() < stop_at:
                     b = r.read(65536)
                     if not b:
@@ -3578,8 +3589,10 @@ def _speed_dir(url, seconds, max_bytes, streams, upload=False):
     for t in th:
         t.join(seconds + 20)
     el = max(0.001, min(time.monotonic(), stop_at) - t0)
-    if not total[0] and errs:
+    if errs and total[0] < 1000000:  # under 1 MB: the test didn't really run
         raise ModemError(errs[0][:200])
+    if total[0] < 1000000:
+        raise ModemError("%s: the server sent/accepted only %d bytes" % ("upload" if upload else "download", total[0]))
     return round(total[0] * 8 / el / 1e6, 1), round(total[0] / 1e6, 1)
 
 
@@ -3595,10 +3608,18 @@ def speed_test(cfg):
         time.sleep(4)
         idle = [r for _, r in p.take() if r is not None]
         row["idle_ms"] = round(sorted(idle)[len(idle) // 2], 1) if idle else ""
-        row["down_mbps"], row["down_mb"] = _speed_dir(url, secs, cap, 4)
+        errs = []
+        try:
+            row["down_mbps"], row["down_mb"] = _speed_dir(url, secs, cap, 4)
+        except ModemError as e:
+            errs.append(str(e))
         dl = [r for _, r in p.take() if r is not None]
-        row["up_mbps"], row["up_mb"] = _speed_dir(url, secs, cap, 4, upload=True)
+        try:
+            row["up_mbps"], row["up_mb"] = _speed_dir(url, secs, cap, 4, upload=True)
+        except ModemError as e:
+            errs.append(str(e))
         ul = [r for _, r in p.take() if r is not None]
+        row["error"] = "; ".join(errs)
         p.stop = True
         loaded = sorted(dl + ul)
         row["loaded_ms"] = round(loaded[len(loaded) // 2], 1) if loaded else ""
