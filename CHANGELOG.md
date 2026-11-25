@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.7.0
+- **"What's new" covers every version you're skipping.** When an update spans several releases (say 1.6.7 to 1.6.9), the updater shows the notes for each of them, newest first, instead of only the latest. Also in `update-check --json` (`releases`, `notes`). You'll see this starting with the update after this one, because the dialog comes from the installed version.
+- **MTR for path traces during packet loss.** With the `mtr` package installed (`apk add mtr-json` or `mtr-nojson`), the trace saved during packet loss is an MTR report: 10 rounds by default, adjustable under Settings → Network & weather. It shows loss, average, best and worst latency per hop. The report shows each trace as a table with the hop where the loss starts highlighted. Loss at one middle hop with clean hops after it is treated as that router deprioritizing pings, not real loss. The complaint summary says where the loss began across all traces, e.g. "began at hop 1, inside your ISP's network, right after the modem". Without mtr, traceroute is used as before.
+
 ## 1.6.9
 - The Status → Overview tile's script is also installed under a versioned file name, so the browser shows the new tile right after an update instead of a cached old one.
 

@@ -305,10 +305,15 @@ return view.extend({
 			return parts.join('<br>');
 		};
 
-		o = s.option(form.Flag, 'trace_on_loss', _('Traceroute during packet loss'),
-			_('Saves a traceroute to the first ping target when packets are lost (at most every 15 minutes). Shown on the report.'));
+		o = s.option(form.Flag, 'trace_on_loss', _('Trace the path during packet loss'),
+			_('Saves a path trace to the first ping target when packets are lost (at most every 15 minutes), shown on the report and summarized in the complaint summary. With the <code>mtr</code> package installed (<code>apk add mtr-json</code>, or <code>mtr-nojson</code>), MTR measures loss and latency at every hop over several rounds and shows where the loss starts; otherwise a plain traceroute is saved.'));
 		o.default = '1';
 		o.rmempty = false;
+
+		o = s.option(form.Value, 'trace_rounds', _('MTR rounds'), _('Probes per hop; each round takes about a second.'));
+		o.datatype = 'range(3,60)';
+		o.placeholder = '10';
+		o.depends('trace_on_loss', '1');
 
 		o = s.option(form.Value, 'weather_lat', _('Weather: latitude'),
 			_('Optional. Records outdoor temperature and precipitation from <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> (free, no account) so the report can show whether levels or errors follow the weather. Two decimals (about 1 km) is plenty. Find yours by right-clicking a spot in Google Maps.'));

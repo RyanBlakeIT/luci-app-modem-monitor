@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.6.9"
+VERSION = "1.7.0"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -133,7 +133,8 @@ DEFAULTS = {
     "alert_cooldown_min": "60", # per alert type
     "gw_ping": "1",             # also ping the ISP gateway (first hop)
     "gw_target": "",            # empty = WAN default gateway
-    "trace_on_loss": "1",       # save a traceroute when packets are lost (max every 15 min)
+    "trace_on_loss": "1",       # trace the path when packets are lost (max every 15 min): mtr, else traceroute
+    "trace_rounds": "10",       # mtr probes per hop
     "weather_lat": "",          # outdoor weather from Open-Meteo; empty = off
     "weather_lon": "",
     "weather_unit": "C",        # C or F
@@ -2142,7 +2143,7 @@ details summary{cursor:pointer;color:var(--text-secondary);font-size:13px;margin
 <div class="card section"><h2>Incidents</h2><div class="sub">Times the modem couldn't be reached, pings failed completely, or the modem rebooted.</div><div class="scroll"><table id="inc"></table></div></div>
 <div class="card section" id="speedCard" style="display:none"><h2>Speed tests</h2><div class="sub" id="speedNote"></div><div id="speed"></div></div>
 <div class="card section" id="creditCard" style="display:none"><h2>Outages by month</h2><div class="sub">Outages (modem unreachable or no traffic getting through) and modem re-registrations, leaving out planned work: technician visits, reboots you started, and router or wiring changes. Use <b>Credit letter</b> on the router's Cable Modem page for a request letter.</div><div class="scroll"><table id="credit"></table></div><div class="sub" id="backupNote" style="margin-top:6px"></div></div>
-<div class="card section" id="traceCard" style="display:none"><h2>Traceroutes during packet loss</h2><div class="sub">Saved automatically when pings lose packets (at most every 15 minutes). The first hops after this router belong to the ISP; where the stars or high times begin shows where the loss starts.</div><div id="traces"></div></div>
+<div class="card section" id="traceCard" style="display:none"><h2>Path traces during packet loss</h2><div class="sub">Saved automatically when pings lose packets (at most every 15 minutes), with MTR when the <code>mtr</code> package is installed (loss and latency per hop over several rounds), otherwise traceroute. The first hops after this router belong to the ISP. Loss that starts at one hop and carries through to the destination is real; loss at a single middle hop with clean hops after it is usually that router deprioritizing pings to itself.</div><div id="traces"></div></div>
 <div class="card section"><h2>Modem event log</h2><div class="sub">New log entries collected since monitoring began. Login entries from this monitor are hidden.</div><div class="scroll"><table id="ev"></table></div></div>
 <div class="card section"><h2>Raw data (CSV)</h2><div class="sub">Download these and attach them to a complaint or ticket. To get everything in one file, use <b>Download all data</b> on the router's Cable Modem page, or run <code>modem-monitor export</code>.</div><div id="files"></div></div>
 </div>
@@ -2303,7 +2304,9 @@ function tables(){const lo=SINCE||0,DL=D.daylist||[],K=DL.map(()=>({T3:0,T4:0,SY
  $("#inc").innerHTML=inc.length?"<tr><th>Start</th><th>End</th><th class=num>About (min)</th><th>What happened</th></tr>"+inc.map(i=>"<tr><td>"+i.start+"</td><td>"+i.end+"</td><td class=num>"+(i.mins||"\u2013")+"</td><td>"+esc(i.why)+"</td></tr>").join(""):"<tr><td class=empty>No incidents recorded"+(lo?" since the selected entry":"")+".</td></tr>";
  $("#ev").innerHTML=ev.length?"<tr><th>Time</th><th>Type</th><th>Message</th></tr>"+ev.map(e=>"<tr><td>"+e.time+"</td><td"+((e.type==="T3"||e.type==="T4"||e.type==="PROVISION")?" class=flag":"")+">"+esc(e.type)+"</td><td>"+esc(e.msg)+"</td></tr>").join(""):"<tr><td class=empty>No event log entries"+(lo?" since the selected entry":" collected yet")+".</td></tr>";
  const TR=(D.traces||[]).filter(t=>t.ts>=lo).reverse();$("#traceCard").style.display=TR.length?"":"none";
- $("#traces").innerHTML=TR.map(t=>"<details><summary>"+esc(t.time)+" \u00b7 "+esc(t.why)+"</summary><pre style='font-size:12px;overflow:auto'>"+esc(t.out)+"</pre></details>").join("");
+ $("#traces").innerHTML=TR.map(t=>{const S=t.start,sum=esc(t.time)+" \u00b7 "+esc(t.why)+(S?" \u00b7 <b>loss starts at hop "+S.hop+" ("+esc(S.host)+")</b>":t.hops?" \u00b7 no loss reached the destination":"");
+  const body=t.hops?"<div class=scroll><table><tr><th class=num>Hop</th><th>Host</th><th class=num>Loss</th><th class=num>Sent</th><th class=num>Avg ms</th><th class=num>Best</th><th class=num>Worst</th></tr>"+t.hops.map(h=>"<tr"+(S&&h.hop>=S.hop?" style='color:var(--critical)'":"")+"><td class=num>"+h.hop+"</td><td>"+esc(h.host)+"</td><td class=num>"+h.loss+"%</td><td class=num>"+h.sent+"</td><td class=num>"+(h.avg??"\u2013")+"</td><td class=num>"+(h.best??"\u2013")+"</td><td class=num>"+(h.worst??"\u2013")+"</td></tr>").join("")+"</table></div>":"<pre style='font-size:12px;overflow:auto'>"+esc(t.out)+"</pre>";
+  return "<details><summary>"+sum+"</summary>"+body+"</details>"}).join("");
  $("#maint").querySelectorAll("tr[data-s]").forEach(r=>r.classList.toggle("sel",r.dataset.s===SID))}
 const ba=w=>{if(!w)return"<span class=ba>\u2013</span>";const r=a=>a&&a[0]!=null?a[0]+".."+a[1]:"?";return"<span class=ba>DS "+r(w.ds)+" \u00b7 US "+r(w.us)+" dBmV<br>"+(w.uncorr_day==null?"\u2013":w.uncorr_day.toLocaleString())+" uncorr/day \u00b7 "+w.t3t4+" T3/T4 \u00b7 "+w.drw+" DRW"+(w.hours<23?" ("+w.hours+" h)":"")+"</span>"};
 $("#maint").innerHTML=(D.maint||[]).length?"<tr><th>#</th><th>When</th><th>Type</th><th>What happened</th><th>24 h before</th><th>24 h after</th></tr>"+D.maint.slice().reverse().map(m=>"<tr data-s='"+esc(m.id)+"'><td class=num>"+m.n+"</td><td>"+m.time+(m.end_time?" to "+(m.end_time.slice(0,10)===m.time.slice(0,10)?m.end_time.slice(11):m.end_time):"")+"</td><td>"+esc(m.type)+(m.status==="suggested"?" <span class=badge>suggested</span>":"")+"</td><td>"+esc(m.note)+" <a class=sl data-s='"+esc(m.id)+"'>show data after this</a></td><td>"+ba(m.before)+"</td><td>"+ba(m.after)+"</td></tr>").join(""):"<tr><td class=empty>No maintenance entries yet.</td></tr>";
@@ -2710,28 +2713,85 @@ def trace_file(cfg, ts):
 
 
 def start_trace(cfg, st, now, why):
-    """Run traceroute in the background (it can take a while) and append it to
-    the monthly traces log, so the sample itself isn't delayed."""
+    """Trace the path during packet loss, in the background so the sample
+    isn't delayed, appending to the monthly traces log. Uses MTR (10 rounds,
+    per-hop loss and latency) when the mtr package is installed, otherwise
+    traceroute."""
     if cfg.get("trace_on_loss", "1") != "1" or now - st.get("last_trace", 0) < TRACE_EVERY_S:
         return
     target = (cfg.get("ping_targets") or "1.1.1.1").split()[0]
-    tool = shutil.which("traceroute")
-    if not tool:
+    if not re.match(r"^[\w.:-]+$", target):
         return
+    mtr, tr = shutil.which("mtr"), shutil.which("traceroute")
+    if not mtr and not tr:
+        return
+    rounds = max(3, min(60, int(fnum(cfg, "trace_rounds"))))
     st["last_trace"] = int(now)
-    head = "### %d %s | %s | traceroute to %s" % (int(now), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
-                                                   why, target)
+    head = "### %d %s | %s | %s to %s" % (int(now), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), why,
+                                          "mtr (%d rounds)" % rounds if mtr else "traceroute", target)
+    if mtr:
+        # JSON where the build supports it (mtr-json), else the text report (mtr-nojson)
+        cmd = ["/bin/sh", "-c", '"$0" -n -j -c "$1" "$2" 2>/dev/null || "$0" -n -r -w -c "$1" "$2"',
+               mtr, str(rounds), target]
+    else:
+        cmd = [tr, "-n", "-q", "2", "-w", "2", "-m", "20", target]
     path = trace_file(cfg, now)
     try:
         with open(path, "a") as f:
             f.write(head + "\n")
         os.chmod(path, 0o644)
         out = open(path, "a")
-        subprocess.Popen([tool, "-n", "-q", "2", "-w", "2", "-m", "20", target], stdout=out, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, start_new_session=True)
+        subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         out.close()
     except OSError as e:
-        log("traceroute failed: %s" % e)
+        log("path trace failed: %s" % e)
+
+
+def parse_hops(body):
+    """Per-hop results from MTR output (JSON or text report). Returns a list
+    of {hop, host, loss, sent, avg, best, worst} or None for plain traceroute."""
+    body = body.strip()
+    hops = []
+    if body.startswith("{"):
+        try:
+            for h in json.loads(body).get("report", {}).get("hubs", []):
+                hops.append({"hop": int(h.get("count", 0)), "host": h.get("host", "???"), "loss": float(h.get("Loss%", 0)),
+                             "sent": int(h.get("Snt", 0)), "avg": h.get("Avg"), "best": h.get("Best"), "worst": h.get("Wrst")})
+        except (ValueError, AttributeError):
+            return None
+        return hops or None
+    for line in body.splitlines():
+        m = re.match(r"\s*(\d+)\.\|--\s+(\S+)\s+([\d.]+)%?\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)", line)
+        if m:
+            hops.append({"hop": int(m.group(1)), "host": m.group(2), "loss": float(m.group(3)), "sent": int(m.group(4)),
+                         "avg": float(m.group(6)), "best": float(m.group(7)), "worst": float(m.group(8))})
+    return hops or None
+
+
+def loss_start(hops):
+    """Where the loss really begins: the first hop whose loss carries through to
+    the destination. Loss at a middle hop only (with clean hops after it) is
+    usually a router deprioritizing pings to itself, not real loss."""
+    if not hops or hops[-1]["loss"] <= 0:
+        return None
+    i = len(hops) - 1
+    while i > 0 and hops[i - 1]["loss"] > 0:  # silent "???" hops count as passing it on
+        i -= 1
+    while i < len(hops) - 1 and hops[i]["host"] == "???":
+        i += 1  # name the first hop that actually answered
+    h = hops[i]
+    return {"hop": h["hop"], "host": h["host"], "loss": h["loss"], "end_loss": hops[-1]["loss"]}
+
+
+def trace_starts(cfg, lo, hi):
+    """How often loss began at each hop, over MTR traces in a period."""
+    c = {}
+    for t in read_traces(cfg, lo, 1000):
+        if t["ts"] < hi and t["start"]:
+            k = "%d|%s" % (t["start"]["hop"], t["start"]["host"])
+            c[k] = c.get(k, 0) + 1
+    return [{"hop": int(k.split("|")[0]), "host": k.split("|", 1)[1], "n": n}
+            for k, n in sorted(c.items(), key=lambda x: (-x[1], int(x[0].split("|")[0])))]
 
 
 def read_traces(cfg, since, limit=30):
@@ -2746,8 +2806,9 @@ def read_traces(cfg, since, limit=30):
             head, _, body = block.partition("\n")
             m = re.match(r"(\d+) (\S+ \S+) \| (.*?) \| (.*)$", head)
             if m and int(m.group(1)) >= since:
+                hops = parse_hops(body)
                 res.append({"ts": int(m.group(1)), "time": m.group(2), "why": m.group(3), "what": m.group(4),
-                            "out": body.strip()[:3000]})
+                            "out": body.strip()[:3000], "hops": hops, "start": loss_start(hops)})
     return res[-limit:]
 
 
@@ -3919,6 +3980,7 @@ def complaint_summary(cfg, d_from, d_to, exclude_work=True):
                 "gw_on": any(fv(r, "gw_loss") is not None for r in summ),
                 "both_loss": sum(1 for r in summ if (fv(r, "gw_loss") or 0) > 0 and (fv(r, "ping_loss") or 0) > 0),
                 "traces": len(read_traces(cfg, lo, 1000)),
+                "loss_starts": trace_starts(cfg, lo, hi),
                 "speed": [[fv(r, "down_mbps"), fv(r, "up_mbps")] for r in speed_rows(cfg, lo, hi)
                           if fv(r, "down_mbps") is not None or fv(r, "up_mbps") is not None],
                 "plan": [fnum(cfg, "plan_down") or None, fnum(cfg, "plan_up") or None],
@@ -4001,7 +4063,8 @@ const NI=D.ingress.filter(i=>i.kind==="narrow");
 if(NI.length)F.push("On <b>"+pl(NI.length,"day")+"</b> the errors were concentrated on a few adjacent channels ("+NI.slice(0,4).map(i=>i.day+": "+i.share+"% on "+i.fmin+"–"+i.fmax+" MHz").join("; ")+(NI.length>4?"; …":"")+"). Errors confined to a narrow band are typical of <b>RF ingress</b>: an outside signal leaking into the cable through a damaged line, loose connector or faulty tap.");
 if(T.us_peak!=null&&T.us_peak>L.us_power_max)F.push("Upstream transmit power reached <b>"+T.us_peak+" dBmV</b>, above the "+L.us_power_max+" dBmV guideline, on "+pl(T.us_over_days,"day")+": the modem had to transmit at or near its maximum to be heard, which suggests loss in the line or tap.");
 {const u=Math.max(0,T.reboots-T.router_reboots),P=[];if(u)P.push("rebooted "+pl(u,"time")+" on its own");if(T.relocks)P.push("lost signal and re-registered "+pl(T.relocks,"time")+" without rebooting");if(P.length)F.push("The modem "+P.join(" and ")+"."+(T.router_reboots?" ("+pl(T.router_reboots,"planned reboot")+" listed below "+(T.router_reboots===1?"is":"are")+" not included.)":""))}
-if(T.gw_on&&T.loss_polls){if(T.both_loss>=Math.max(1,T.loss_polls/2))F.push("In "+pl(T.both_loss,"sample")+" with packet loss, pings to "+esc(isp)+"\u2019s own gateway (the first hop past the modem) failed too, so the loss starts on the local cable segment, not further out on the internet."+(T.traces?" "+pl(T.traces,"traceroute was","traceroutes were")+" saved during the loss.":""));else if(T.traces)F.push(pl(T.traces,"traceroute was","traceroutes were")+" saved during packet loss.")}
+if(T.gw_on&&T.loss_polls){if(T.both_loss>=Math.max(1,T.loss_polls/2))F.push("In "+pl(T.both_loss,"sample")+" with packet loss, pings to "+esc(isp)+"\u2019s own gateway (the first hop past the modem) failed too, so the loss starts on the local cable segment, not further out on the internet."+(T.traces?" "+pl(T.traces,"path trace was","path traces were")+" saved during the loss.":""));else if(T.traces)F.push(pl(T.traces,"path trace was","path traces were")+" saved during packet loss.")}
+if(T.loss_starts&&T.loss_starts.length){const LS=T.loss_starts,tot=LS.reduce((a,x)=>a+x.n,0),top=LS[0];F.push("Path traces (MTR) during packet loss: in "+top.n+" of "+pl(tot,"trace")+" the loss began at <b>hop "+top.hop+"</b> ("+esc(top.host)+") and carried through to the destination"+(top.hop<=2?"; that hop is inside "+esc(isp)+"\u2019s network, right after the modem":"")+(LS.length>1?". Other starting points: "+LS.slice(1,4).map(x=>"hop "+x.hop+" ("+esc(x.host)+") \u00d7"+x.n).join(", "):"")+".")}
 if(T.hires_on&&T.drops)F.push("One ping per second to "+esc(isp)+"\u2019s gateway recorded <b>"+pl(T.drops,"short dropout")+"</b> (2 or more seconds with no reply, longest "+T.longest+" s) on "+pl(T.drop_days,"day")+". Interruptions this short are missed by ordinary checks but freeze calls, video and online games.");
 if(T.lostch)F.push("In "+pl(T.lostch,"sample")+" the modem was running on only part of its bonded channels (channels it normally holds had dropped), which lowers speed and reliability.");
 if(T.speed&&T.speed.length){const S=T.speed,md=a=>{const v=a.filter(x=>x!=null).sort((x,y)=>x-y);return v.length?v[Math.floor(v.length/2)]:null},pd=T.plan[0],pu=T.plan[1];
@@ -4225,6 +4288,28 @@ def update_check(cfg, force=False, cached=False):
                                      "size": a.get("size", 0), "digest": a.get("digest") or ""}
                     break
             info["newer"] = _vt(info["latest"]) > _vt(VERSION)
+            if info["newer"]:
+                # notes for every release between the installed version and the latest,
+                # newest first, so skipping versions doesn't lose context
+                try:
+                    allrel = json.loads(_https_get("https://api.github.com/repos/%s/releases?per_page=50" % repo).decode())
+                    between = [r for r in allrel if not r.get("draft") and not r.get("prerelease")
+                               and _vt(VERSION) < _vt(r.get("tag_name", "").lstrip("v")) <= _vt(info["latest"])]
+                    between.sort(key=lambda r: _vt(r.get("tag_name", "").lstrip("v")), reverse=True)
+                    if len(between) > 1:
+                        info["releases"] = [r.get("tag_name", "") for r in between]
+                        parts, used = [], 0
+                        for r in between:
+                            body = (r.get("body") or "").strip() or "(no notes)"
+                            chunk = "## %s\n%s" % (r.get("tag_name", ""), body)
+                            if used + len(chunk) > 14000:
+                                parts.append("## Older releases\nSee %s/releases" % ("https://github.com/" + repo))
+                                break
+                            parts.append(chunk)
+                            used += len(chunk)
+                        info["notes"] = "\n\n".join(parts)
+                except Exception as e:
+                    log("could not list releases for combined notes: %s" % e)
             if info["newer"] and not info["asset"]:
                 info["error"] = "release %s has no %s file" % (tag, ext)
         except urllib.error.HTTPError as e:

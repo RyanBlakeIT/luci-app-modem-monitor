@@ -18,7 +18,7 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 - **Per-channel error heatmap and ingress detection:** uncorrectable errors per downstream channel over time. Days when most errors sit on a few adjacent channels are flagged as likely RF ingress, with the frequency range, which is useful evidence that the problem is in the cable plant.
 - **Alerts:** phone notifications through [ntfy](https://ntfy.sh) (no account needed), Pushover, Telegram, a JSON webhook or email for outages, unexplained reboots, re-registrations, T3/T4 bursts, uncorrectable spikes (with the affected channels), high upstream power and packet loss. Alerts raised while the internet is down are delivered once it is back.
 - **Complaint summary:** a printable one-page summary for any date range, with findings in plain language, day-by-day counts, repairs and calls from the maintenance log, outages and the modem's own timeout messages. Print it or save it as a PDF.
-- **ISP gateway ping and traceroutes:** each sample also pings the first hop past the modem. Loss there too means the problem is on the local cable segment. A traceroute is saved automatically during packet loss.
+- **ISP gateway ping and path traces:** each sample also pings the first hop past the modem. Loss there too means the problem is on the local cable segment. During packet loss a path trace is saved automatically: with MTR when the `mtr` package is installed (`apk add mtr-json`), which shows loss and latency per hop and where the loss starts, otherwise traceroute.
 - **Weather:** optional outdoor temperature and precipitation from Open-Meteo (free, no account), with a note when upstream power, downstream power or errors follow temperature or rain, which is typical of corroded connectors and water in outdoor cabling.
 - **Integrations:** Prometheus metrics at `/modem-monitor/metrics.txt`, Home Assistant sensors through MQTT discovery (needs `mosquitto-client`), and a Zabbix template in `examples/zabbix/`.
 - **1-second latency probe (optional):** one small ping per second to the ISP gateway catches jitter and dropouts of a few seconds that 5-minute samples miss. Shown on the report, in alerts, the daily summary and the complaint summary.
@@ -99,7 +99,7 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 | `ping_targets`, `ping_count` | `1.1.1.1 8.8.8.8`, `5` | Internet reachability check |
 | `us_power_min/max`, `ds_power_min/max`, `ds_snr_min` | `35/51`, `-7/7`, `33` | Shaded "healthy" bands (common DOCSIS 3.1 guidelines, not ISP specs) |
 | `gw_ping`, `gw_target` | `1`, auto | Ping the ISP gateway (WAN default gateway unless set) |
-| `trace_on_loss` | `1` | Save a traceroute when packets are lost (max every 15 min) |
+| `trace_on_loss`, `trace_rounds` | `1`, `10` | Trace the path when packets are lost (max every 15 min): MTR with this many rounds if installed, else traceroute |
 | `weather_lat`, `weather_lon`, `weather_unit` | —, —, `C` | Open-Meteo location (empty = off) and `C`/`F` |
 | `prom_textfile` | — | Extra copy of the Prometheus metrics (node-exporter textfile collector) |
 | `mqtt_host`, `mqtt_port`, `mqtt_user`, `mqtt_pass`, `mqtt_tls` | —, `1883`, —, —, `0` | MQTT broker; empty host = off |

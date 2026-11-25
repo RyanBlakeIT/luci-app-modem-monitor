@@ -217,7 +217,9 @@ return view.extend({
 	showNotes: function(u, install) {
 		var self = this;
 		var body = [
-			E('p', {}, _('Version %s (installed: %s). ').format(u.latest, u.current)),
+			E('p', {}, (u.releases && u.releases.length > 1)
+				? _('Version %s (installed: %s). This update includes %d releases; changes in each are listed below, newest first.').format(u.latest, u.current, u.releases.length)
+				: _('Version %s (installed: %s). ').format(u.latest, u.current)),
 			notesNode(u.notes),
 			E('p', {}, E('a', { 'href': u.url, 'target': '_blank', 'rel': 'noopener' }, _('Open the release on GitHub')))
 		];
@@ -227,7 +229,8 @@ return view.extend({
 			E('button', { 'class': 'btn', 'click': ui.hideModal }, install ? _('Cancel') : _('Close')), ' ',
 			install ? E('button', { 'class': 'btn cbi-button-positive', 'click': function() { self.installUpdate(u); } }, _('Install %s').format(u.latest)) : ''
 		]));
-		ui.showModal(install ? _('Install update') : _("What's new in %s").format(u.latest), body);
+		ui.showModal(install ? _('Install update') : ((u.releases && u.releases.length > 1)
+			? _("What's new since %s").format(u.current) : _("What's new in %s").format(u.latest)), body);
 	},
 
 	installUpdate: function(u) {
