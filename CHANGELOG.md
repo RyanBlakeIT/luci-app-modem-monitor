@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.8
+- **Redesigned Status → Overview tile:**
+  - a status pill: green **Online**, amber **problems today** or **channels missing**, red **unreachable**
+  - the age of the last sample and your ISP
+  - a grid of metric cards, each marked green or red against your guideline ranges: downstream power, SNR, upstream power, timeouts today, uncorrectables today, packet loss with the ISP gateway, jitter/dropouts
+  - a button to the report
+
+  It follows the theme's light and dark modes (tested with Argon). Hovering a card shows details.
+
 ## 1.6.7
 - Speed tests recorded before 1.6.5 with a refused download now count as failed downloads ("no data moved"), not 0 Mb/s results, on the report, the Settings list and in the complaint summary, so they no longer pull down medians or count as "below plan".
 

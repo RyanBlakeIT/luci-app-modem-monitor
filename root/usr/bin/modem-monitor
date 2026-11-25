@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.6.7"
+VERSION = "1.6.8"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1670,6 +1670,7 @@ def poll(cfg):
     st["today"] = td
     row["today"] = {k: v for k, v in td.items() if k != "day"}
     row["tile"] = cfg.get("overview_tile", "1")
+    row["limits"] = {k: fnum(cfg, k) for k in ("us_power_min", "us_power_max", "ds_power_min", "ds_power_max", "ds_snr_min")}
     row["isp"] = (cfg.get("isp_name") or "").strip()
     row["lost_ch"] = " and ".join(row.pop("_lost_ch", None) or [])
     try:
