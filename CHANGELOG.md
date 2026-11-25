@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.2
+- **Settings in tabs:** one tab per area (Modem, Alerts, Line quality, Network & weather, Outage credits, Speed tests, Backup, Integrations, Storage & pings, Guideline ranges, Updates) instead of one long page. The page reopens on the tab you last used, and Save & Apply covers all tabs.
+- The installed version and update status are shown at the top of the page on every tab. **Test connection** moved into the Modem tab.
+
 ## 1.6.1
 - **Latency probe target falls back automatically.** With the target set to `gateway` (the default), the probe checks that the ISP gateway answers pings. If it doesn't, the probe uses the next hop along the path that does, found by traceroute, and only then the first ping target. The report shows which target is in use and why.
 - **The probe re-checks its target while running.** If the target stops answering while ordinary pings to the internet get through, that window is discarded rather than counted as dropouts, and a new target is chosen. A target that keeps dropping 20% or more for three samples while the internet is clean is replaced too. Every 6 hours the probe checks whether the gateway itself answers again.
