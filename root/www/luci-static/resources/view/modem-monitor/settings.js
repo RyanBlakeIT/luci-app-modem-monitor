@@ -124,14 +124,39 @@ return view.extend({
 			_('The modem web UI password. On the S33 the default is usually the last 8 characters of the serial number on the label (case-sensitive), unless you changed it.'));
 		o.password = true;
 
-		o = s.option(form.Value, 'interval', _('Sample every (seconds)'));
-		o.datatype = 'range(60,3600)';
-		o.placeholder = '300';
+		var secs = function(v) {
+			return v % 3600 == 0 ? N_(v / 3600, '%d hour', '%d hours').format(v / 3600)
+				: N_(v / 60, '%d minute', '%d minutes').format(v / 60);
+		};
 
-		o = s.option(form.Value, 'report_interval', _('Rebuild report every (seconds)'),
-			_('How often the report page is refreshed with new samples. Samples are recorded either way.'));
+		o = s.option(form.Value, 'interval', _('Sample every'),
+			_('How often the modem is read and the pings are run. Pick from the list or type a number of seconds (60 to 3600). Shorter catches brief problems in more detail; 5 minutes is plenty for a complaint record.'));
+		[ 60, 120, 300, 600, 900, 1800, 3600 ].forEach(function(v) {
+			o.value(String(v), secs(v) + (v == 300 ? ' ' + _('(recommended)') : ''));
+		});
 		o.datatype = 'range(60,3600)';
-		o.placeholder = '900';
+		o.default = '300';
+		o.rmempty = false;
+		o.onchange = function(ev, section_id) {
+			// re-check "Rebuild report" against the new sample rate
+			var r = this.map.lookupOption('report_interval', section_id),
+			    w = r && r[0].getUIElement(section_id);
+			if (w) w.triggerValidation();
+		};
+
+		o = s.option(form.Value, 'report_interval', _('Rebuild report'),
+			_('How often the report page is refreshed with new samples. Samples are recorded either way. "After every sample" always follows the sample rate, even if you change it later. Or type a number of seconds, no shorter than the sample rate.'));
+		o.value('0', _('After every sample'));
+		[ 300, 600, 900, 1800, 3600 ].forEach(function(v) { o.value(String(v), _('Every %s').format(secs(v))); });
+		o.datatype = 'or("0", range(60,3600))';
+		o.default = '900';
+		o.rmempty = false;
+		o.validate = function(section_id, value) {
+			var v = +value, iv = +(this.section.formvalue(section_id, 'interval') || 300);
+			if (v != 0 && v < iv)
+				return _('Can\'t be more often than the sample rate (%s). Choose "After every sample" or a longer interval.').format(secs(iv));
+			return true;
+		};
 
 		o = s.option(form.ListValue, 'modem_route', _('How the router reaches the modem'),
 			_('Host route (recommended): adds a route to the modem address over the WAN port and no extra address. Alias: adds a 192.168.100.x address to the WAN port (labelled <em>wan-device</em>:mm); DDNS clients set to read the WAN interface (ip_source=interface) can mistake it for your public IP. Off: you set up access yourself.'));

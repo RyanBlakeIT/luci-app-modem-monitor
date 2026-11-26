@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.8.2
+- **Easier timing settings (Modem tab):** *Sample every* and *Rebuild report* are now drop-downs (1 minute to 1 hour) that still accept a typed number of seconds.
+- **Rebuild report → After every sample:** the report is rebuilt right after each sample and keeps following the sample rate if you change it later. The report is never rebuilt more often than samples are taken: Settings refuses a shorter interval, and the service treats one set by hand as after every sample.
+
 ## 1.8.1
 - **Release notes always show in the update dialog:** if a release page has no notes, the updater now reads that version's section of the changelog instead of showing "(no notes)", and releases can no longer be published without notes. The 1.8.0 release page went out without its notes; they are below.
 

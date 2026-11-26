@@ -56,7 +56,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1820,7 +1820,7 @@ def build_report(cfg):
     interval = int(fnum(cfg, "interval"))
 
     data = {"generated": time.strftime("%Y-%m-%d %H:%M:%S"), "now": now, "interval": interval,
-            "report_interval": max(60, int(fnum(cfg, "report_interval"))),
+            "report_interval": report_every(cfg),
             "thresholds": {k: fnum(cfg, k) for k in
                            ("us_power_min", "us_power_max", "ds_power_min", "ds_power_max", "ds_snr_min")},
             "ranges": {}}
@@ -4790,10 +4790,18 @@ def set_cpu(cfg):
     return ", ".join(msg)
 
 
+def report_every(cfg):
+    """Seconds between report rebuilds; 0 (or anything at or below the sample
+    interval) means after every sample."""
+    interval = max(60, int(fnum(cfg, "interval")))
+    rep = int(fnum(cfg, "report_interval"))
+    return interval if rep <= interval else rep
+
+
 def daemon(cfg):
     cpu = set_cpu(cfg)
     interval = max(60, int(fnum(cfg, "interval")))
-    rep_every = max(60, int(fnum(cfg, "report_interval")))
+    rep_every = report_every(cfg)
     log("started v%s, polling %s every %ds%s" % (VERSION, cfg["host"], interval, (" (%s)" % cpu) if cpu else ""))
     last_rep = 0
     last_prune = 0
