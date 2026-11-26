@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.7.2"
+VERSION = "1.7.3"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -4659,12 +4659,15 @@ def daemon(cfg):
                     save_state(cfg, fresh)
             except Exception as e:
                 log("%s error: %r" % (fn.__name__, e))
-        if time.time() - last_rep >= rep_every:
+        # Measured from the start of each cycle, with a little slack, so a report
+        # interval equal to the sample interval rebuilds after every sample (it
+        # used to slip to every other one by the few seconds a cycle takes).
+        if t0 - last_rep >= rep_every - min(30, interval / 2):
             try:
                 build_report(cfg)
             except Exception as e:
                 log("report error: %r" % e)
-            last_rep = time.time()
+            last_rep = t0
         if cfg.get("update_check", "1") == "1" and time.time() - last_upd >= 6 * 3600:
             try:
                 update_check(cfg)

@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.7.3
+- **Fixed: a report interval equal to the sample interval rebuilt only every other sample.** For example, 300 s / 300 s gave a new report every 10 minutes, not 5. The rebuild timer now counts from the start of each cycle with a little slack, so the report is rebuilt right after each sample when the intervals match. Each cycle still takes the sample first, then rebuilds the report.
+
 ## 1.7.2
 - **New entry type: Power outage (home)** (`power`). A modem that restarted because the house lost power isn't the ISP's fault. Like planned work, confirmed power outages are left out of the complaint summary and credit letter, which list them under "Left out of the counts" and mention power failures at home.
 - **Power cuts are detected automatically.** When the router and the modem both restart within 15 minutes, the Maintenance Log gets a suggested **Power outage at home?** entry to confirm. The router's reboot is held for a few minutes first, because the modem comes back after the router.
