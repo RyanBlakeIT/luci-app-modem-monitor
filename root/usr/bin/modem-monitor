@@ -23,6 +23,7 @@ Commands:
                          one-page printable summary for a complaint (default: last 30 days);
                          disruption from planned work is left out unless --all
   modem-monitor alert-test   send a test notification to every configured alert channel
+  modem-monitor trace [--status] [--json]   run a path trace now (MTR if installed), or show which tool is used
   modem-monitor weather [--fetch] [--json]   latest outdoor reading (fetch now with --fetch)
   modem-monitor credit [--month YYYY-MM] [--json]   outage totals and a credit-request letter
   modem-monitor backup   copy the data off the router now (see backup_dest)
@@ -55,7 +56,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.7.4"
+VERSION = "1.8.0"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1694,6 +1695,14 @@ def poll(cfg):
     row["tile"] = cfg.get("overview_tile", "1")
     row["limits"] = {k: fnum(cfg, k) for k in ("us_power_min", "us_power_max", "ds_power_min", "ds_power_max", "ds_snr_min")}
     row["isp"] = (cfg.get("isp_name") or "").strip()
+    try:
+        sp = speed_rows(cfg, now - 3 * 86400)
+        if sp:
+            r = sp[-1]
+            row["speed_last"] = {"ts": int(r["ts"]), "down": fv(r, "down_mbps"), "up": fv(r, "up_mbps"),
+                                 "idle": fv(r, "idle_ms"), "loaded": fv(r, "loaded_ms"), "error": r.get("error", "")}
+    except Exception:
+        pass
     row["lost_ch"] = " and ".join(row.pop("_lost_ch", None) or [])
     try:
         write_metrics(cfg, st, row, ds, us)
@@ -1957,6 +1966,7 @@ def build_report(cfg):
                      for r in sp]
     # plan speeds are Mb/s; ignore values that can't be (e.g. kb/s typed by mistake)
     data["plan"] = [v if v and v <= 10000 else None for v in (fnum(cfg, "plan_down"), fnum(cfg, "plan_up"))]
+    data["sqm"] = list(sqm_limits())
     try:
         data["credit"] = credit_months(cfg) if cfg.get("credit_enabled", "1") == "1" else None
     except Exception as e:
@@ -2272,18 +2282,46 @@ function render(){const rg=D.ranges[R];$("#rng").innerHTML=Object.keys(D.ranges)
  const mk=(D.maint||[]).filter(m=>(m.end||m.ts)>=Math.max(D.now-rg.span,SINCE||0)).length;$("#mk").textContent=mk?"Dashed lines on the charts mark "+mk+" maintenance log entr"+(mk===1?"y":"ies")+" (numbers match the Maintenance log below). Hover a chart for details.":"";
  CH.forEach(c=>g.appendChild(chart(c,rg)));heat(rg);speed(rg);credit()}
 function speed(rg){const S=(D.speed||[]),card=$("#speedCard");if(!S.length){card.style.display="none";return}card.style.display="";
- const x0=Math.max(D.now-Math.max(rg.span,7*86400),SINCE||0),P=S.filter(r=>r[0]>=x0),pd=D.plan[0],pu=D.plan[1],last=S[S.length-1];
- $("#speedNote").innerHTML="Measured from this router"+(last?"; latest "+esc(fmtFull(last[0]))+": <b>"+(last[1]??"–")+"</b> Mb/s down, <b>"+(last[2]??"–")+"</b> Mb/s up, latency "+(last[3]??"–")+" ms idle and "+(last[4]??"–")+" ms under load"+(last[5]?" (error: "+esc(last[5])+")":""):"")+". Traffic shaping on the router (SQM) caps these results."+(pd||pu?" Dashed lines: your plan"+(pd?" "+pd+" down":"")+(pu?" / "+pu+" up":"")+".":"");
- if(!P.length){$("#speed").innerHTML="<div class=empty>No tests in this range.</div>";return}
- const W=1000,H=200,L=50,Rr=10,Tp=8,B=22,x1=D.now,vals=P.flatMap(r=>[r[1],r[2]]).filter(v=>v!=null).concat([pd,pu].filter(v=>v));
- const t=nice(0,Math.max(1,...vals),4),hi=t[t.length-1],X=v=>L+(v-x0)/(x1-x0)*(W-L-Rr),Y=v=>Tp+(1-v/hi)*(H-Tp-B);
- let g="<div class=legend><span><i style='background:var(--s1)'></i>Download</span><span><i style='background:var(--s2)'></i>Upload</span></div><svg viewBox='0 0 "+W+" "+H+"' role=img aria-label='Speed tests'><g class=axis>";
- t.forEach(v=>{g+="<line class=gl x1="+L+" x2="+(W-Rr)+" y1="+Y(v)+" y2="+Y(v)+" /><text x="+(L-6)+" y="+(Y(v)+4)+" text-anchor=end>"+v+"</text>"});
- for(let i=0;i<=4;i++){const tt=x0+(x1-x0)*i/4;g+="<text x="+X(tt)+" y="+(H-4)+" text-anchor="+(i?i==4?"end":"middle":"start")+">"+esc(fmtT(tt,x1-x0))+"</text>"}g+="</g>";
- [[pd,"var(--s1)"],[pu,"var(--s2)"]].forEach(a=>{if(a[0])g+="<line x1="+L+" x2="+(W-Rr)+" y1="+Y(a[0])+" y2="+Y(a[0])+" stroke='"+a[1]+"' stroke-opacity=.6 stroke-dasharray='5 4'/>"});
- [[1,"var(--s1)"],[2,"var(--s2)"]].forEach(a=>{const pts=P.filter(r=>r[a[0]]!=null);if(pts.length>1)g+="<path d='"+pts.map((r,i)=>(i?"L":"M")+X(r[0]).toFixed(1)+","+Y(r[a[0]]).toFixed(1)).join("")+"' fill=none stroke='"+a[1]+"' stroke-width=2 stroke-linejoin=round />";
-  pts.forEach(r=>{g+="<circle cx="+X(r[0]).toFixed(1)+" cy="+Y(r[a[0]]).toFixed(1)+" r=4 fill='"+a[1]+"' stroke='var(--surface-1)' stroke-width=2><title>"+esc(fmtFull(r[0]))+": "+r[1]+" down / "+r[2]+" up Mb/s, "+(r[3]??"–")+" ms idle, "+(r[4]??"–")+" ms loaded</title></circle>"})});
- $("#speed").innerHTML=g+"</svg>"}
+ /* one bar pair per test (daily tests are far apart on a time axis); at least the last 14 tests */
+ const x0=Math.max(D.now-rg.span,SINCE||0),inR=S.filter(r=>r[0]>=x0),P=(inR.length>=14?inR:S.filter(r=>r[0]>=(SINCE||0)).slice(-14)).slice(-60);
+ const pd=D.plan[0],pu=D.plan[1],pct=!!(pd&&pu),last=S[S.length-1],ok=P.filter(r=>r[1]!=null||r[2]!=null);
+ const med=a=>{const v=a.filter(x=>x!=null).sort((x,y)=>x-y);return v.length?v[Math.floor(v.length/2)]:null};
+ const f1=v=>v==null?"–":(v>=100?Math.round(v):v),pp=(v,pl)=>v==null||!pl?"":" ("+Math.round(v/pl*100)+"%)";
+ const md=med(ok.map(r=>r[1])),mu=med(ok.map(r=>r[2])),li=med(ok.map(r=>r[3])),ll=med(ok.map(r=>r[4]));
+ const sq=D.sqm||[],ed=pd&&sq[0]?Math.min(pd,sq[0]):pd,eu=pu&&sq[1]?Math.min(pu,sq[1]):pu;  /* the router's own shaper caps the tests */
+ const low=pct?ok.filter(r=>(r[1]!=null&&r[1]<0.8*ed)||(r[2]!=null&&r[2]<0.8*eu)).length:0,fail=P.filter(r=>r[5]).length;
+ const T=[["Latest",f1(last[1])+" / "+f1(last[2]),"Mb/s down / up · "+fmtFull(last[0]),!!last[5]],
+  ["Median ("+P.length+" tests)",f1(md)+" / "+f1(mu),"Mb/s"+(pct?" · "+Math.round(md/pd*100)+"% / "+Math.round(mu/pu*100)+"% of plan":""),false],
+  ["Latency idle → load",f1(li)+" → "+f1(ll),"ms (median) · "+(li!=null&&ll!=null?(ll-li>30?"bufferbloat":"no bufferbloat"):""),li!=null&&ll!=null&&ll-li>30],
+  [pct?"Below 80% of plan":"Failed tests",pct?low+" of "+ok.length:String(fail),pct?((ed<pd||eu<pu)?"of SQM cap where lower":"tests")+(fail?" \u00b7 "+fail+" failed":""):"of "+P.length,pct?low>0:fail>0]];
+ $("#speedNote").innerHTML="<div class=tiles style='margin:8px 0 6px'>"+T.map(i=>"<div class='tile"+(i[3]?" bad":"")+"'><div class=k>"+esc(i[0])+"</div><div class=v>"+esc(i[1])+"</div><div class=n>"+esc(i[2])+"</div></div>").join("")+"</div>"+
+  "Measured from this router"+(sq[0]||sq[1]?"; the router\u2019s traffic shaping (SQM "+(sq[0]?Math.round(sq[0])+" down":"")+(sq[0]&&sq[1]?" / ":"")+(sq[1]?Math.round(sq[1])+" up":"")+" Mb/s) caps these results, so tests are judged against whichever is lower, the plan or the SQM limit.":"; traffic shaping on the router (SQM) caps these results.")+(pct?" Bars show each test as a percentage of your plan ("+pd+" down / "+pu+" up Mb/s), so download and upload share one scale.":(pd||pu?"":" Set your plan speeds under Settings → Speed tests to compare each test with what you pay for."))+(last[5]?" Latest error: "+esc(last[5]):"");
+ if(!P.length){$("#speed").innerHTML="<div class=empty>No tests yet.</div>";return}
+ const lab=r=>{const d=new Date(r[0]*1000);return (d.getMonth()+1)+"/"+d.getDate()};
+ const tip=r=>esc(fmtFull(r[0]))+": "+(r[1]??"–")+" down"+pp(r[1],pd)+" / "+(r[2]??"–")+" up"+pp(r[2],pu)+" Mb/s; latency "+(r[3]??"–")+" ms idle, "+(r[4]??"–")+" ms loaded"+(r[5]?"; "+esc(r[5]):"");
+ function bars(series,unit,refs,H){/* series: [[name,color,valueFn]] */
+  const W=1000,L=50,Rr=56,Tp=8,B=22,n=P.length,vals=P.flatMap(r=>series.map(x=>x[2](r))).filter(v=>v!=null).concat(refs.map(x=>x[0]));
+  const t=nice(0,Math.max(1,...vals),4),hi=t[t.length-1],Y=v=>Tp+(1-v/hi)*(H-Tp-B),slot=(W-L-Rr)/n,gapw=Math.min(8,slot*0.25),bw=Math.max(1.5,(slot-gapw)/series.length-1);
+  let g="<svg viewBox='0 0 "+W+" "+H+"' role=img aria-label='Speed tests'><g class=axis>";
+  t.forEach(v=>{g+="<line class=gl x1="+L+" x2="+(W-Rr)+" y1="+Y(v)+" y2="+Y(v)+" /><text x="+(L-6)+" y="+(Y(v)+4)+" text-anchor=end>"+v+"</text>"});
+  const every=Math.max(1,Math.ceil(n/12));P.forEach((r,i)=>{if(i%every===0||i===n-1)g+="<text x="+(L+slot*i+slot/2).toFixed(1)+" y="+(H-5)+" text-anchor=middle>"+lab(r)+"</text>"});g+="</g>";
+  /* reference lines; their labels sit in the right margin, nudged apart so close lines stay readable */
+  const lbl=refs.map(x=>({y:Y(x[0]),t:x[1]})).sort((p,q)=>p.y-q.y);for(let i=1;i<lbl.length;i++)if(lbl[i].y-lbl[i-1].y<13)lbl[i].y=lbl[i-1].y+13;
+  refs.forEach(x=>{g+="<line x1="+L+" x2="+(W-Rr)+" y1="+Y(x[0])+" y2="+Y(x[0])+" stroke='var(--text-secondary)' stroke-opacity=.7 stroke-dasharray='"+x[2]+"'/>"});
+  lbl.forEach(l=>{g+="<text x="+(W-Rr+6)+" y="+(l.y+4).toFixed(1)+" text-anchor=start font-size=11 fill='var(--text-secondary)'>"+l.t+"</text>"});
+  P.forEach((r,i)=>{series.forEach((x,k)=>{const v=x[2](r),X=L+slot*i+gapw/2+k*(bw+1);
+   if(v==null){g+="<text x="+(X+bw/2).toFixed(1)+" y="+(Y(0)-3)+" text-anchor=middle font-size=10 fill='var(--critical)'>×<title>"+tip(r)+"</title></text>";return}
+   const y=Y(v);g+="<rect x="+X.toFixed(1)+" y="+y.toFixed(1)+" width="+bw.toFixed(1)+" height="+Math.max(0,Y(0)-y).toFixed(1)+" rx=2 fill='"+x[1]+"'><title>"+tip(r)+"</title></rect>"})});
+  return g+"</svg>"}
+ const leg=n=>"<div class=legend>"+n.map(x=>"<span><i style='background:"+x[1]+"'></i>"+x[0]+"</span>").join("")+"</div>";
+ if(pct){const S2=[["Download % of plan","var(--s1)",r=>r[1]==null?null:Math.round(r[1]/pd*1000)/10],["Upload % of plan","var(--s2)",r=>r[2]==null?null:Math.round(r[2]/pu*1000)/10]];
+  const R2=[[100,"plan","5 4"],[80,"80%","2 4"]];
+  if(sq[0]&&sq[0]<pd&&sq[1]&&sq[1]<pu&&Math.abs(sq[0]/pd-sq[1]/pu)<0.03)R2.push([Math.round(sq[0]/pd*100),"SQM","8 3 2 3"]);
+  else{if(sq[0]&&sq[0]<pd)R2.push([Math.round(sq[0]/pd*100),"SQM \u2193","8 3 2 3"]);if(sq[1]&&sq[1]<pu)R2.push([Math.round(sq[1]/pu*100),"SQM \u2191","8 3 2 3"])}
+  $("#speed").innerHTML=leg(S2)+bars(S2,"%",R2,220)}
+ else{const D1=[["Download","var(--s1)",r=>r[1]]],U1=[["Upload","var(--s2)",r=>r[2]]];
+  const rd=(pd?[[pd,"plan","5 4"]]:[]).concat(sq[0]?[[Math.round(sq[0]),"SQM","8 3 2 3"]]:[]),ru=(pu?[[pu,"plan","5 4"]]:[]).concat(sq[1]?[[Math.round(sq[1]),"SQM","8 3 2 3"]]:[]);
+  $("#speed").innerHTML="<div><b>Download</b> <span class=sub>Mb/s</span>"+bars(D1,"",rd,170)+"</div><div style='margin-top:8px'><b>Upload</b> <span class=sub>Mb/s</span>"+bars(U1,"",ru,170)+"</div>"}}
 function credit(){const C=D.credit,card=$("#creditCard");if(!C||!C.length){card.style.display="none";return}card.style.display="";
  const pr=C.some(m=>m.price);
  $("#credit").innerHTML="<tr><th>Month</th><th class=num>Outages</th><th class=num>Minutes</th><th class=num>Re-registrations / reboots</th>"+(D.hires_on?"<th class=num>Short dropouts</th>":"")+"<th class=num>Days affected</th>"+(pr?"<th class=num>Credit (prorated / per day)</th>":"")+"</tr>"+
@@ -2736,39 +2774,88 @@ def trace_file(cfg, ts):
     return os.path.join(cfg["data_dir"], "traces-%s.log" % time.strftime("%Y-%m", time.localtime(ts)))
 
 
-def start_trace(cfg, st, now, why):
-    """Trace the path during packet loss, in the background so the sample
-    isn't delayed, appending to the monthly traces log. Uses MTR (10 rounds,
-    per-hop loss and latency) when the mtr package is installed, otherwise
-    traceroute."""
-    if cfg.get("trace_on_loss", "1") != "1" or now - st.get("last_trace", 0) < TRACE_EVERY_S:
-        return
+def trace_status():
+    """Which tool path traces will use."""
+    mtr, tr = shutil.which("mtr"), shutil.which("traceroute")
+    pkg = ""
+    if mtr:
+        for name in ("mtr-json", "mtr-nojson", "mtr"):
+            try:
+                if subprocess.run(["apk", "info", "-e", name], capture_output=True, timeout=10).returncode == 0:
+                    pkg = name
+                    break
+            except (OSError, subprocess.SubprocessError):
+                break
+    return {"mtr": mtr, "mtr_pkg": pkg, "traceroute": tr, "using": "mtr" if mtr else ("traceroute" if tr else None)}
+
+
+def trace_cmd(cfg):
+    """(command, label, target) for a path trace, or None if no tool is available."""
     target = (cfg.get("ping_targets") or "1.1.1.1").split()[0]
     if not re.match(r"^[\w.:-]+$", target):
-        return
+        return None
     mtr, tr = shutil.which("mtr"), shutil.which("traceroute")
-    if not mtr and not tr:
-        return
     rounds = max(3, min(60, int(fnum(cfg, "trace_rounds"))))
-    st["last_trace"] = int(now)
-    head = "### %d %s | %s | %s to %s" % (int(now), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), why,
-                                          "mtr (%d rounds)" % rounds if mtr else "traceroute", target)
     if mtr:
         # JSON where the build supports it (mtr-json), else the text report (mtr-nojson)
-        cmd = ["/bin/sh", "-c", '"$0" -n -j -c "$1" "$2" 2>/dev/null || "$0" -n -r -w -c "$1" "$2"',
-               mtr, str(rounds), target]
-    else:
-        cmd = [tr, "-n", "-q", "2", "-w", "2", "-m", "20", target]
+        return (["/bin/sh", "-c", '"$0" -n -j -c "$1" "$2" 2>/dev/null || "$0" -n -r -w -c "$1" "$2"',
+                 mtr, str(rounds), target], "mtr (%d rounds)" % rounds, target)
+    if tr:
+        return [tr, "-n", "-q", "2", "-w", "2", "-m", "20", target], "traceroute", target
+    return None
+
+
+def _trace_head(now, why, label, target):
+    return "### %d %s | %s | %s to %s" % (int(now), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), why,
+                                          label, target)
+
+
+def start_trace(cfg, st, now, why):
+    """Trace the path during packet loss, in the background so the sample
+    isn't delayed, appending to the monthly traces log. Uses MTR (per-hop loss
+    and latency over several rounds) when the mtr package is installed,
+    otherwise traceroute."""
+    if cfg.get("trace_on_loss", "1") != "1" or now - st.get("last_trace", 0) < TRACE_EVERY_S:
+        return
+    tc = trace_cmd(cfg)
+    if not tc:
+        return
+    cmd, label, target = tc
+    st["last_trace"] = int(now)
     path = trace_file(cfg, now)
     try:
         with open(path, "a") as f:
-            f.write(head + "\n")
+            f.write(_trace_head(now, why, label, target) + "\n")
         os.chmod(path, 0o644)
         out = open(path, "a")
         subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         out.close()
     except OSError as e:
         log("path trace failed: %s" % e)
+
+
+def trace_now(cfg):
+    """Run a path trace now and wait for it (for the Settings button and CLI).
+    It is saved with the others, marked as started by hand."""
+    tc = trace_cmd(cfg)
+    if not tc:
+        raise ModemError("neither mtr nor traceroute is installed")
+    cmd, label, target = tc
+    now = time.time()
+    rounds = max(3, min(60, int(fnum(cfg, "trace_rounds"))))
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=rounds * 2 + 40, stdin=subprocess.DEVNULL)
+        body = (out.stdout or "") + (out.stderr or "")
+    except subprocess.TimeoutExpired:
+        raise ModemError("the trace took too long")
+    os.makedirs(cfg["data_dir"], exist_ok=True)
+    path = trace_file(cfg, now)
+    with open(path, "a") as f:
+        f.write(_trace_head(now, "started by hand", label, target) + "\n" + body.rstrip() + "\n")
+    os.chmod(path, 0o644)
+    hops = parse_hops(body)
+    return {"ts": int(now), "what": "%s to %s" % (label, target), "hops": hops, "start": loss_start(hops),
+            "out": body.strip()[:4000]}
 
 
 def parse_hops(body):
@@ -3371,6 +3458,12 @@ def day_digest(cfg, day=None):
         parts.append("%d short dropout%s%s" % (drops, "" if drops == 1 else "s", " (longest %d s)" % longest if drops else ""))
     if lostch:
         parts.append("channels missing in %d sample%s" % (lostch, "" if lostch == 1 else "s"))
+    for r in speed_rows(cfg, lo, hi)[-1:]:
+        if r.get("error") and fv(r, "down_mbps") is None and fv(r, "up_mbps") is None:
+            parts.append("speed test failed (%s)" % r["error"][:60])
+        else:
+            parts.append("speed test %s/%s Mb/s, latency %s ms idle / %s ms loaded" % (
+                r.get("down_mbps") or "-", r.get("up_mbps") or "-", r.get("idle_ms") or "-", r.get("loaded_ms") or "-"))
     try:
         ch, info = channel_uncorr(cfg, {"d": (lo, 86400)}, hi=hi)
         f = ingress_findings(ch["d"], info)
@@ -3607,6 +3700,24 @@ def backup_due(cfg, st, now):
 # --------------------------------------------------------------------------
 # Speed tests (optional; uses data)
 # --------------------------------------------------------------------------
+
+def sqm_limits():
+    """Download/upload shaper rates (Mb/s) of enabled SQM queues, if any.
+    Speed tests from the router can't exceed these, so low results are judged
+    against min(plan, SQM limit) rather than the plan alone."""
+    try:
+        out = subprocess.run(["uci", "-q", "show", "sqm"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+    q = {}
+    for line in out.splitlines():
+        m = re.match(r"sqm\.([^.=]+)\.(enabled|download|upload)='?([^']*)'?$", line)
+        if m:
+            q.setdefault(m.group(1), {})[m.group(2)] = m.group(3)
+    down = [float(x["download"]) / 1000 for x in q.values() if x.get("enabled") == "1" and (x.get("download") or "0") not in ("0", "")]
+    up = [float(x["upload"]) / 1000 for x in q.values() if x.get("enabled") == "1" and (x.get("upload") or "0") not in ("0", "")]
+    return (min(down) if down else None), (min(up) if up else None)
+
 
 def speed_rows(cfg, since, hi=None):
     """Speed test history. Directions that moved under 1 MB (refused downloads
@@ -4010,6 +4121,7 @@ def complaint_summary(cfg, d_from, d_to, exclude_work=True):
                 "speed": [[fv(r, "down_mbps"), fv(r, "up_mbps")] for r in speed_rows(cfg, lo, hi)
                           if fv(r, "down_mbps") is not None or fv(r, "up_mbps") is not None],
                 "plan": [fnum(cfg, "plan_down") or None, fnum(cfg, "plan_up") or None],
+                "sqm": list(sqm_limits()),
                 "hires_on": any(fv(r, "hr_sent") for r in summ),
                 "drops": int(sum(fv(r, "hr_drops") or 0 for r in summ)),
                 "drop_days": len({r["time"][:10] for r in summ if (fv(r, "hr_drops") or 0) > 0}),
@@ -4094,8 +4206,9 @@ if(T.loss_starts&&T.loss_starts.length){const LS=T.loss_starts,tot=LS.reduce((a,
 if(T.hires_on&&T.drops)F.push("One ping per second to "+esc(isp)+"\u2019s gateway recorded <b>"+pl(T.drops,"short dropout")+"</b> (2 or more seconds with no reply, longest "+T.longest+" s) on "+pl(T.drop_days,"day")+". Interruptions this short are missed by ordinary checks but freeze calls, video and online games.");
 if(T.lostch)F.push("In "+pl(T.lostch,"sample")+" the modem was running on only part of its bonded channels (channels it normally holds had dropped), which lowers speed and reliability.");
 if(T.speed&&T.speed.length){const S=T.speed,md=a=>{const v=a.filter(x=>x!=null).sort((x,y)=>x-y);return v.length?v[Math.floor(v.length/2)]:null},pd=T.plan[0],pu=T.plan[1];
- const low=S.filter(r=>(pd&&r[0]!=null&&r[0]<0.8*pd)||(pu&&r[1]!=null&&r[1]<0.8*pu)).length;
- F.push(pl(S.length,"speed test")+" from the router: median "+md(S.map(r=>r[0]))+" Mb/s down and "+md(S.map(r=>r[1]))+" Mb/s up"+(pd||pu?"; "+low+" of them below 80% of the plan speed ("+(pd?pd+" down":"")+(pd&&pu?" / ":"")+(pu?pu+" up":"")+" Mb/s)":"")+". The router's own traffic shaping can cap these, so a low result is a lead rather than proof.")}
+ const sq=T.sqm||[],ed=pd&&sq[0]?Math.min(pd,sq[0]):pd,eu=pu&&sq[1]?Math.min(pu,sq[1]):pu;
+ const low=S.filter(r=>(ed&&r[0]!=null&&r[0]<0.8*ed)||(eu&&r[1]!=null&&r[1]<0.8*eu)).length;
+ F.push(pl(S.length,"speed test")+" from the router: median "+md(S.map(r=>r[0]))+" Mb/s down and "+md(S.map(r=>r[1]))+" Mb/s up"+(pd||pu?"; "+low+" of them below 80% of the plan speed ("+(pd?pd+" down":"")+(pd&&pu?" / ":"")+(pu?pu+" up":"")+" Mb/s"+((ed!==pd||eu!==pu)?", or of the router\u2019s own traffic-shaping limit where that is lower":"")+")":"")+". The router's own traffic shaping can cap these, so a low result is a lead rather than proof.")}
 (D.weather||[]).forEach(w=>F.push(esc(w)));
 if(T.outages)F.push(pl(T.outages,"outage")+" (modem unreachable or no internet), about "+f(T.down_min)+" minutes in total.");
 if(T.link_on)F.push(T.link_err?"The router recorded "+f(T.link_err)+" Ethernet errors on its connection to the modem.":"The router’s Ethernet connection to the modem recorded <b>no errors</b>, which rules out the home router and the router–modem cable.");
@@ -4789,6 +4902,31 @@ def main():
         print(p)
     elif cmd == "test":
         sys.exit(test(cfg, "--raw" in args))
+    elif cmd == "trace":
+        if "--status" in args:
+            st_ = trace_status()
+            print(json.dumps(st_) if "--json" in args else
+                  "path traces use: %s%s" % (st_["using"] or "nothing (install mtr-json)",
+                                             (" (%s)" % st_["mtr_pkg"]) if st_["mtr_pkg"] else ""))
+        else:
+            set_cpu(cfg)
+            try:
+                r = trace_now(cfg)
+            except ModemError as e:
+                print(json.dumps({"error": str(e)}) if "--json" in args else "error: %s" % e)
+                sys.exit(1)
+            if "--json" in args:
+                print(json.dumps(r))
+            else:
+                print(r["what"])
+                if r["hops"]:
+                    print("%4s  %-40s %7s %5s %8s %8s" % ("hop", "host", "loss", "sent", "avg ms", "worst"))
+                    for h in r["hops"]:
+                        print("%4d  %-40s %6.1f%% %5d %8s %8s" % (h["hop"], h["host"][:40], h["loss"], h["sent"], h["avg"], h["worst"]))
+                    print("loss starts at hop %d (%s)" % (r["start"]["hop"], r["start"]["host"]) if r["start"] else
+                          "no loss reached the destination")
+                else:
+                    print(r["out"])
     elif cmd == "weather":
         st = load_state(cfg)
         info = {"configured": bool((cfg.get("weather_lat") or "").strip() and (cfg.get("weather_lon") or "").strip()),

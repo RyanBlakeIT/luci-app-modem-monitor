@@ -65,12 +65,15 @@ return view.extend({
 			}), null),
 			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'speedtest', '--last', '--json' ]).then(function(r) {
 				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
+			}), null),
+			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'trace', '--status', '--json' ]).then(function(r) {
+				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
 			}), null)
 		]);
 	},
 
 	render: function(data) {
-		var m, s, o, ver = data[0], upd = data[1], wx = data[2], sp = data[3], self = this;
+		var m, s, o, ver = data[0], upd = data[1], wx = data[2], sp = data[3], trs = data[4], self = this;
 
 		m = new form.Map('modem_monitor', _('Cable Modem Monitor'),
 			_('Polls the cable modem (tested with the Arris SURFboard S33) for signal levels, error counters and its event log, and pings the internet, every few minutes. Save & Apply, then use "Test connection" on the Modem tab.') + ' ' + versionLine(ver, upd));
@@ -313,7 +316,45 @@ return view.extend({
 		o = s.option(form.Value, 'trace_rounds', _('MTR rounds'), _('Probes per hop; each round takes about a second.'));
 		o.datatype = 'range(3,60)';
 		o.placeholder = '10';
-		o.depends('trace_on_loss', '1');
+
+		o = s.option(form.DummyValue, '_trace_tool', _('Path trace tool'));
+		o.rawhtml = true;
+		o.cfgvalue = function() {
+			if (!trs) return _('unknown');
+			if (trs.mtr)
+				return '<span style="color:#1a9f5b">\u25cf</span> ' + _('MTR is installed%s and is used for path traces.').format(trs.mtr_pkg ? ' (' + trs.mtr_pkg + ')' : '');
+			return '<span style="color:#c98500">\u25cf</span> ' + _('MTR is not installed, so path traces use traceroute (no per-hop loss). Install it with <code>apk add mtr-json</code>, then reload this page.');
+		};
+
+		var esc = function(t) { return String(t == null ? '' : t).replace(/[&<>"]/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+		o = s.option(form.Button, '_trace_now', ' ', _('Traces the path to the first ping target now (takes about %d seconds) and saves it with the others on the report.').format((+uci.get('modem_monitor', 'main', 'trace_rounds') || 10) + 5));
+		o.inputtitle = _('Run a path trace now');
+		o.inputstyle = 'action';
+		o.onclick = function() {
+			ui.showModal(_('Path trace'), [ E('p', { 'class': 'spinning' }, _('Tracing the path…')) ]);
+			return fs.exec('/usr/bin/modem-monitor', [ 'trace', '--json' ]).then(function(res) {
+				var r = null;
+				try { r = JSON.parse(res.stdout || 'null'); } catch (e) {}
+				var body;
+				if (!r || r.error)
+					body = E('p', { 'style': 'color:#c42b2b' }, (r && r.error) || ((res.stdout || '') + (res.stderr || '')).trim() || _('No answer.'));
+				else if (r.hops && r.hops.length) {
+					var html = '<table class="table" style="font-variant-numeric:tabular-nums"><tr class="tr"><th class="th">' + _('Hop') + '</th><th class="th">' + _('Host') +
+						'</th><th class="th">' + _('Loss') + '</th><th class="th">' + _('Sent') + '</th><th class="th">' + _('Avg ms') + '</th><th class="th">' + _('Worst ms') + '</th></tr>' +
+						r.hops.map(function(h) {
+							var hot = r.start && h.hop >= r.start.hop;
+							return '<tr class="tr"' + (hot ? ' style="color:#c42b2b"' : '') + '><td class="td">' + h.hop + '</td><td class="td">' + esc(h.host) + '</td><td class="td">' + h.loss +
+								'%</td><td class="td">' + h.sent + '</td><td class="td">' + (h.avg == null ? '\u2013' : h.avg) + '</td><td class="td">' + (h.worst == null ? '\u2013' : h.worst) + '</td></tr>';
+						}).join('') + '</table>';
+					body = E('div', {}, [
+						E('p', {}, esc(r.what) + ' \u00b7 ' + (r.start ? _('loss starts at hop %d (%s)').format(r.start.hop, r.start.host) : _('no loss reached the destination'))),
+						E('div', { 'style': 'max-height:50vh;overflow:auto' }, [ (function() { var d = E('div'); d.innerHTML = html; return d; })() ])
+					]);
+				} else
+					body = E('div', {}, [ E('p', {}, esc(r.what)), E('pre', { 'style': 'white-space:pre-wrap;max-height:50vh;overflow:auto;font-size:13px' }, r.out) ]);
+				ui.showModal(_('Path trace'), [ body, E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, _('Close'))) ]);
+			});
+		};
 
 		o = s.option(form.Value, 'weather_lat', _('Weather: latitude'),
 			_('Optional. Records outdoor temperature and precipitation from <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> (free, no account) so the report can show whether levels or errors follow the weather. Two decimals (about 1 km) is plenty. Find yours by right-clicking a spot in Google Maps.'));

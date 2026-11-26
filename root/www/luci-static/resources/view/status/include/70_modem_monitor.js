@@ -76,6 +76,16 @@ return baseclass.extend({
 			card((loss || 0) > 0 || (gw || 0) > 0 ? 'bad' : 'ok', _('Packet loss'), loss == null ? '–' : String(loss), '%',
 				gw != null ? _('ISP gateway %s%%').format(gw) : _('last sample'))
 		);
+		var sp = d.speed_last;
+		if (sp) {
+			var spFail = sp.down == null && sp.up == null;
+			cards.push(card(spFail || sp.error ? 'bad' : 'ok', _('Speed test'),
+				spFail ? _('failed') : (sp.down == null ? '\u2013' : Math.round(sp.down)) + ' / ' + (sp.up == null ? '\u2013' : sp.up), spFail ? '' : 'Mb/s',
+				(sp.idle != null ? _('%s\u2192%s ms').format(sp.idle, sp.loaded) + ' \u00b7 ' : '') +
+					new Date(sp.ts * 1000).toLocaleDateString([], { month: 'numeric', day: 'numeric' }),
+				(spFail || sp.error ? sp.error + ' \u00b7 ' : _('Download / upload; latency idle \u2192 under load') + ' \u00b7 ') +
+					new Date(sp.ts * 1000).toLocaleString()));
+		}
 		if (d.hr_sent)
 			cards.push(card(drops > 0 ? 'bad' : 'ok', _('Jitter / dropouts'), jit == null ? '–' : String(jit), 'ms',
 				_('%d short dropouts today').format(drops)));

@@ -81,8 +81,24 @@ return view.extend({
 			return exec(args).then(function() { location.reload(); }).catch(self.fail);
 		};
 
+		/* one click fills the form for something happening right now */
+		var quick = function(t, text) {
+			return E('button', { 'class': 'btn cbi-button', 'click': function() {
+				type.value = t; when.value = dtValue(0); ended.value = '';
+				if (!note.value.trim()) note.value = text;
+				note.focus(); note.setSelectionRange(note.value.length, note.value.length);
+			} }, TYPES.filter(function(x) { return x[0] === t; })[0][1] + ' ' + _('now'));
+		};
+
 		return E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, _('Add an entry')),
+			E('div', { 'style': 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px' }, [
+				E('span', { 'style': 'opacity:.75' }, _('Quick:')),
+				quick('outage', _('Internet down. ')),
+				quick('power', _('Power went out at home. ')),
+				quick('isp-call', _('Called the ISP about ')),
+				quick('wiring', _('Changed '))
+			]),
 			field(_('When'), when, _('Defaults to now. Use the time the work started.')),
 			field(_('Ended'), ended, _('Optional. Shown as a shaded span on the charts; the "after" comparison starts here.')),
 			field(_('Type'), type),
