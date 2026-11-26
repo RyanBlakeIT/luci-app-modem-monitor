@@ -114,6 +114,9 @@ jobs:
           else
             awk -v v="## $VER" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
           fi
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no '## $VER' section: refusing to publish a release without notes"; exit 1
+          fi
           if [ ! -f out/luci-app-modem-monitor.pem ] && grep -q '^SIGNED_RELEASES=1' build.sh; then
             echo "APK_SIGN_KEY secret missing: refusing to publish an unsigned release"; exit 1
           fi

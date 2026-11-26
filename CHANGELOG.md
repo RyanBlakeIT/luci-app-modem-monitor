@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.8.1
+- **Release notes always show in the update dialog:** if a release page has no notes, the updater now reads that version's section of the changelog instead of showing "(no notes)", and releases can no longer be published without notes. The 1.8.0 release page went out without its notes; they are below.
+
 ## 1.8.0
 - **Speed tests, redesigned:**
   - A summary row: latest result, median down/up (and % of plan), median latency idle → under load, and how many tests were below 80% of plan.

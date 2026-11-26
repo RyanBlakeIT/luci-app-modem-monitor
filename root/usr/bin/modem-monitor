@@ -56,7 +56,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -4399,6 +4399,24 @@ def _pkg_tool():
     return None
 
 
+def _changelog_notes(repo, tag):
+    """Fallback when a release page has no notes: that version's section of CHANGELOG.md at the tag."""
+    try:
+        txt = _https_get("https://raw.githubusercontent.com/%s/%s/CHANGELOG.md" % (repo, tag)).decode("utf-8", "replace")
+    except Exception:
+        return ""
+    out, on = [], False
+    for line in txt.splitlines():
+        if line.startswith("## "):
+            if on:
+                break
+            on = line[3:].strip() == tag.lstrip("v")
+            continue
+        if on:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
 def update_check(cfg, force=False, cached=False):
     now = time.time()
     try:
@@ -4419,7 +4437,7 @@ def update_check(cfg, force=False, cached=False):
             rel = json.loads(_https_get("https://api.github.com/repos/%s/releases/latest" % repo).decode())
             tag = rel.get("tag_name", "")
             info.update(latest=tag.lstrip("v"), url=rel.get("html_url", ""),
-                        notes=(rel.get("body") or "")[:6000])
+                        notes=((rel.get("body") or "").strip() or _changelog_notes(repo, tag))[:6000])
             ext = ".ipk" if _pkg_tool() == "opkg" else ".apk"
             for a in rel.get("assets", []):
                 if a.get("name", "").startswith("luci-app-modem-monitor") and a["name"].endswith(ext):
@@ -4439,7 +4457,8 @@ def update_check(cfg, force=False, cached=False):
                         info["releases"] = [r.get("tag_name", "") for r in between]
                         parts, used = [], 0
                         for r in between:
-                            body = (r.get("body") or "").strip() or "(no notes)"
+                            body = ((r.get("body") or "").strip()
+                                    or _changelog_notes(repo, r.get("tag_name", "")) or "(no notes)")
                             chunk = "## %s\n%s" % (r.get("tag_name", ""), body)
                             if used + len(chunk) > 14000:
                                 parts.append("## Older releases\nSee %s/releases" % ("https://github.com/" + repo))
