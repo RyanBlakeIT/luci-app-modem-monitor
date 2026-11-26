@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1830,7 +1830,8 @@ def build_report(cfg):
             "drops": [{"name": "Short dropouts", "pts": bucketize([(int(r["ts"]), fv(r, "hr_drops")) for r in s], b, "sum")}],
             "jitter": [{"name": "Worst 5% latency (p95)", "pts": bucketize([(int(r["ts"]), fv(r, "hr_p95")) for r in s], b, "max")},
                        {"name": "Jitter", "pts": bucketize([(int(r["ts"]), fv(r, "hr_jitter")) for r in s], b, "max")}],
-            "temp": [{"name": "Outdoor temperature", "pts": bucketize([(int(r["ts"]), fv(r, "temp")) for r in s], max(b, 1800), "avg")}],
+            "temp": [{"name": "Outdoor temperature", "step": max(b, 1800),
+                      "pts": bucketize([(int(r["ts"]), fv(r, "temp")) for r in s], max(b, 1800), "avg")}],
             "link_err": [{"name": "Link errors", "pts": bucketize([(int(r["ts"]), r["_err"]) for r in lk], b, "sum")}],
             "missed": [{"name": "Missed packets", "pts": bucketize([(int(r["ts"]), r["_missed"]) for r in lk], b, "sum")}],
         }
@@ -2184,7 +2185,7 @@ function nice(lo,hi,n){if(lo===hi){lo-=1;hi+=1}const s=Math.pow(10,Math.floor(Ma
 function chart(c,rg){
  const card=document.createElement("div");card.className="card";
  const X0=Math.max(D.now-rg.span,SINCE||0);
- const ser=rg.series[c.id].map((s,i)=>({name:s.name,ci:i+1,pts:s.pts.filter(p=>p[0]>=X0)})).filter(s=>s.pts.length);
+ const ser=rg.series[c.id].map((s,i)=>({name:s.name,ci:i+1,step:s.step||0,pts:s.pts.filter(p=>p[0]>=X0)})).filter(s=>s.pts.length);
  card.innerHTML="<h2>"+esc(c.title)+" <span class=sub>("+esc(c.unit)+")</span></h2><div class=sub>"+esc(c.note)+"</div>";
  if(!ser.length){card.innerHTML+="<div class=empty>No data yet.</div>";return card}
  if(ser.length>1)card.innerHTML+="<div class=legend>"+ser.map(s=>"<span><i style='background:var(--s"+s.ci+")'></i>"+esc(s.name)+"</span>").join("")+"</div>";
@@ -2204,11 +2205,13 @@ function chart(c,rg){
  const grp=[];MK.slice().sort((a,b)=>a.ts-b.ts).forEach(m=>{const x=X(Math.max(m.ts,x0)),l=grp[grp.length-1];if(l&&x-l.x<16){l.ms.push(m)}else grp.push({x:x,ms:[m]})});
  grp.forEach(G=>{const ns=G.ms.map(m=>m.n),lab=ns.length===1?ns[0]:(ns[ns.length-1]-ns[0]===ns.length-1?ns[0]+"\u2013"+ns[ns.length-1]:ns.join(",")),op=G.ms.every(m=>m.status==="suggested")?0.45:0.9,right=G.x>W-Rr-40;
   g+="<line x1="+G.x.toFixed(1)+" x2="+G.x.toFixed(1)+" y1="+Tp+" y2="+(H-B)+" stroke='var(--text-secondary)' stroke-opacity='"+op+"' stroke-dasharray='3 3'/><text x="+(right?G.x-3:G.x+3).toFixed(1)+" y="+(Tp+10)+" font-size='10' text-anchor='"+(right?"end":"start")+"' fill='var(--text-secondary)' fill-opacity='"+op+"'>"+lab+"</text>"});
- const step=rg.bucket||D.interval,gap=step*3;
+ const step=Math.max(rg.bucket||D.interval,...ser.map(s=>s.step||0)),gap=step*3;  // a series may be coarser (weather: 30 min)
  ser.forEach(s=>{const col="var(--s"+s.ci+")";
   if(c.bars){const nS=ser.length,full=Math.max(1,(W-L-Rr)*step/(x1-x0)-1),bw=Math.max(1,full/nS),off=(s.ci-1)*bw;s.pts.forEach(p=>{if(p[1]>0){const y=Y(p[1]);g+="<rect x="+(X(p[0])+off).toFixed(1)+" y="+y.toFixed(1)+" width="+bw.toFixed(1)+" height="+(Y(0)-y).toFixed(1)+" rx=1 fill='"+col+"'/>"}})}
   else{let d="",prev=null;s.pts.forEach(p=>{d+=(prev===null||p[0]-prev>gap?"M":"L")+X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1);prev=p[0]});
    g+="<path d='"+d+"' fill=none stroke='"+col+"' stroke-width=2 stroke-linejoin=round stroke-linecap=round />";
+   /* a point with no neighbor close enough to join would be invisible as a line: draw it as a dot */
+   s.pts.forEach((p,i)=>{const a=s.pts[i-1],z=s.pts[i+1];if((!a||p[0]-a[0]>gap)&&(!z||z[0]-p[0]>gap))g+="<circle cx="+X(p[0]).toFixed(1)+" cy="+Y(p[1]).toFixed(1)+" r=2.5 fill='"+col+"'/>"});
 }});
  g+="<line class=xh x1=0 x2=0 y1="+Tp+" y2="+(H-B)+" stroke='var(--text-muted)' stroke-dasharray='2 2' style='display:none'/><rect class=hit x="+L+" y="+Tp+" width="+(W-L-Rr)+" height="+(H-Tp-B)+" fill=transparent /></svg>";
  card.insertAdjacentHTML("beforeend",g+"<div class=tip></div>");

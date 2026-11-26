@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.7.1
+- **Fixed: the outdoor temperature chart showed no line in the 24-hour view.** Weather readings are 30 minutes apart, but the chart broke lines at gaps over 15 minutes, so no two points connected. Each series now carries its own spacing. Charts also draw a dot for any point with no neighbor close enough to join, so a chart with data can't look empty.
+
 ## 1.7.0
 - **"What's new" covers every version you're skipping.** When an update spans several releases (say 1.6.7 to 1.6.9), the updater shows the notes for each of them, newest first, instead of only the latest. Also in `update-check --json` (`releases`, `notes`). You'll see this starting with the update after this one, because the dialog comes from the installed version.
 - **MTR for path traces during packet loss.** With the `mtr` package installed (`apk add mtr-json` or `mtr-nojson`), the trace saved during packet loss is an MTR report: 10 rounds by default, adjustable under Settings → Network & weather. It shows loss, average, best and worst latency per hop. The report shows each trace as a table with the hop where the loss starts highlighted. Loss at one middle hop with clean hops after it is treated as that router deprioritizing pings, not real loss. The complaint summary says where the loss began across all traces, e.g. "began at hop 1, inside your ISP's network, right after the modem". Without mtr, traceroute is used as before.
