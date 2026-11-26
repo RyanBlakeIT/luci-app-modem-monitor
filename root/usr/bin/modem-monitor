@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -1329,7 +1329,7 @@ def prune(cfg):
 # --------------------------------------------------------------------------
 
 MAINT_COLS = ["id", "ts", "time", "end_ts", "end_time", "type", "note", "source", "status"]
-MAINT_TYPES = ("tech", "modem-reboot", "router-change", "wiring", "isp-call", "outage", "other")
+MAINT_TYPES = ("tech", "modem-reboot", "router-change", "wiring", "power", "isp-call", "outage", "other")
 
 
 def maint_path(cfg):
@@ -1416,13 +1416,36 @@ def auto_suggest(cfg, st, row, now, uptime, new_events):
     interval = int(fnum(cfg, "interval"))
     prev_ts = st.get("last_ok_ts")
 
+    # Router reboot: detected on the first sample after the router booted, but held
+    # for a while, because after a power cut the modem comes back later than the router
+    boot_id = _read("/proc/sys/kernel/random/boot_id")
+    if boot_id and st.get("router_boot_id") != boot_id:
+        try:
+            up = float(_read("/proc/uptime").split()[0])
+        except (ValueError, IndexError):
+            up = None
+        if st.get("router_boot_id") and up is not None and up < 3600:
+            st["router_boot_pending"] = int(now - up)
+        st["router_boot_id"] = boot_id
+
     # 1. Modem reboot (uptime went backwards)
     if row.get("rebooted") == 1 and uptime is not None:
         boot = int(now - uptime)
-        issued = [r for r in load_maint(cfg) if r["type"] == "modem-reboot" and r["source"] == "router"
-                  and abs(int(r["ts"]) - boot) < 1800]
-        if not issued:
-            suggest(cfg, st, boot, "modem-reboot", "Modem rebooted (uptime reset); not issued from this router")
+        mine = [r for r in load_maint(cfg) if r["type"] in ("modem-reboot", "tech", "power") and r["status"] == "confirmed"
+                and abs(int(r["ts"]) - boot) < 1800]
+        rb = st.get("router_boot_pending") or st.get("router_boot_last")
+        if mine:
+            pass
+        elif rb and abs(rb - boot) <= POWER_PAIR_S:
+            suggest(cfg, st, min(rb, boot), "power",
+                    "Power outage at home? The router (%s) and the modem (%s) both restarted. If the power stayed on, "
+                    "change the type to Outage." % (time.strftime("%H:%M", time.localtime(rb)),
+                                                    time.strftime("%H:%M", time.localtime(boot))))
+            st.pop("router_boot_pending", None)
+        else:
+            suggest(cfg, st, boot, "outage",
+                    "Modem rebooted on its own (uptime reset; not started from this router). If the power went out "
+                    "at home, change the type to Power outage (home).")
 
     # 2. Loss of signal / re-registration without a reboot
     reg = [e for e in new_events if e["type"] in ("PROVISION", "T4", "SYNC")
@@ -1459,16 +1482,12 @@ def auto_suggest(cfg, st, row, now, uptime, new_events):
                 suggest(cfg, st, lv[12][0], "other", "Signal level shift: " + "; ".join(msgs))
                 st["last_shift"] = int(now)
 
-    # 4. Router reboot (first poll after the router booted)
-    boot_id = _read("/proc/sys/kernel/random/boot_id")
-    if boot_id and st.get("router_boot_id") != boot_id:
-        try:
-            up = float(_read("/proc/uptime").split()[0])
-        except (ValueError, IndexError):
-            up = None
-        if st.get("router_boot_id") and up is not None and up < 3600:
-            suggest(cfg, st, int(now - up), "router-change", "Router rebooted")
-        st["router_boot_id"] = boot_id
+    # 4. Router reboot on its own: no modem reboot followed within the window
+    rb = st.get("router_boot_pending")
+    if rb and now - rb > POWER_PAIR_S + 2 * interval:
+        suggest(cfg, st, rb, "router-change", "Router rebooted")
+        st.pop("router_boot_pending", None)
+        st["router_boot_last"] = rb
 
     if row.get("ok") == 1:
         st["last_ok_ts"] = int(now)
@@ -3490,7 +3509,7 @@ if(meas||LG.length){
   if(R.outages.length)h+="<table><tr><th>Start</th><th class=n>Minutes</th><th>What was recorded</th></tr>"+R.outages.map(o=>"<tr><td>"+o.start+"</td><td class=n>"+o.mins+"</td><td>"+esc(o.why)+"</td></tr>").join("")+"</table>";
  }else h+="</p>";
  if(LG.length)h+="<p>"+(meas?"I also noted these interruptions myself, for times before my monitoring was running":"These interruptions happened before my monitoring was running; I noted them myself")+" (from my notes and the modem's own log):</p><ul>"+LG.map(l=>"<li>"+esc(l.start)+(l.end?" to "+esc(l.end.slice(0,10)===l.start.slice(0,10)?l.end.slice(11):l.end):"")+": "+esc(l.note)+"</li>").join("")+"</ul>";
- h+="<p>Interruptions caused by work I requested or carried out myself (technician visits, reboots, changes to my own equipment) are not included.</p>";
+ h+="<p>Interruptions caused by work I requested or carried out myself (technician visits, reboots, changes to my own equipment) or by power failures at my home are not included.</p>";
  if(R.price&&R.per_day>0)h+="<p>My monthly charge is "+money(R.price)+". Prorated for the measured time without service, that is "+money(R.prorated)+"; counting each affected day as a lost day of service, it is "+money(R.per_day)+". I am requesting a credit of <b>"+money(R.per_day)+"</b>"+(LG.length?" plus the days listed above":"")+", or the amount your outage credit policy provides if that is higher.</p>";
  else h+="<p>Please apply the credit your outage policy provides for these interruptions"+(R.price?" (my monthly charge is "+money(R.price)+")":"")+".</p>";
  h+="<p>The detailed logs are available on request."+(D.note?" Reference: "+esc(D.note)+".":"")+"</p>";
@@ -3834,7 +3853,8 @@ def _day_ts(s):
     return int(time.mktime(time.strptime(s, "%Y-%m-%d")))
 
 
-WORK_TYPES = ("tech", "modem-reboot", "router-change", "wiring")
+WORK_TYPES = ("tech", "modem-reboot", "router-change", "wiring", "power")
+POWER_PAIR_S = 15 * 60  # router and modem restarting this close together = power cut at home
 
 
 def work_windows(maint, summ, interval):
@@ -3845,7 +3865,8 @@ def work_windows(maint, summ, interval):
     ok = lambda r: (r.get("ok") == "1" and not r["_reb"] and not r["_rel"] and (fv(r, "ping_loss") or 0) == 0)
     wins = []
     for m in maint:
-        if m["status"] != "confirmed" or m["source"] == "auto" or m["type"] not in WORK_TYPES:
+        if m["status"] != "confirmed" or m["type"] not in WORK_TYPES or \
+                (m["source"] == "auto" and m["type"] != "power"):
             continue
         a = int(m["ts"])
         b = max(int(m.get("end_ts") or 0), a)
@@ -4090,7 +4111,7 @@ const many=D.days.length>62,DR=many?D.days.filter(r=>r.bad):D.days;
 h+=(many?"<div class=muted>Only days with problems are listed ("+DR.length+").</div>":"")+"<table><tr><th>Day</th><th class=n>T3</th><th class=n>T4</th><th class=n>Re-reg. events</th><th class=n>Uncorrectables</th><th class=n>Peak US dBmV</th><th class=n>Reboots</th><th class=n>Re-reg.</th><th class=n>Unreachable samples</th><th class=n>Loss samples</th><th>Pattern</th></tr>"+
  DR.map(r=>"<tr"+(r.bad?" class=bad":"")+"><td>"+r.day+"</td><td class=n>"+r.T3+"</td><td class=n>"+r.T4+"</td><td class=n>"+r.REG+"</td><td class=n>"+f(r.uncorr)+"</td><td class=n>"+f(r.us_max)+"</td><td class=n>"+r.reboots+"</td><td class=n>"+r.relocks+"</td><td class=n>"+r.down+"</td><td class=n>"+r.loss+"</td><td>"+(r.ingress?(r.ingress.kind==="narrow"?"ingress? "+r.ingress.share+"% on "+r.ingress.fmin+"–"+r.ingress.fmax+" MHz":"spread across band"):(r.polls?"":(r.logged?"modem log only":"no data")))+"</td></tr>").join("")+"</table>";
 if(D.maint.length)h+="<h2>Repairs, calls and changes</h2><table><tr><th>When</th><th>Type</th><th>What happened</th></tr>"+D.maint.map(m=>"<tr><td>"+esc(m.time)+(m.end?" to "+esc(m.end.slice(0,10)===m.time.slice(0,10)?m.end.slice(11):m.end):"")+"</td><td style='white-space:nowrap'>"+esc(m.type)+(m.status==="suggested"?" (auto-detected)":"")+"</td><td>"+esc(m.note)+"</td></tr>").join("")+"</table>";
-if(D.excluded.length){h+="<h2>Left out of the counts</h2><p class=muted>Disruption caused by planned work (technician visits, reboots I started, changes to my own router or wiring) is not counted above, from the start of the work until the line settled. What those windows contained:</p><table><tr><th>Window</th><th>Work</th><th class=n>Samples</th><th class=n>T3/T4</th><th class=n>Uncorrectables</th><th class=n>Unreachable</th><th class=n>Reboots / re-reg.</th></tr>"+D.excluded.map(w=>"<tr><td>"+w.start+" to "+(w.end.slice(0,10)===w.start.slice(0,10)?w.end.slice(11):w.end)+"</td><td>"+esc(w.type)+": "+esc(w.note.length>80?w.note.slice(0,80)+"\u2026":w.note)+"</td><td class=n>"+w.samples+"</td><td class=n>"+w.t34+"</td><td class=n>"+f(w.uncorr)+"</td><td class=n>"+w.down+"</td><td class=n>"+w.reb+" / "+w.rel+"</td></tr>").join("")+"</table>"}
+if(D.excluded.length){h+="<h2>Left out of the counts</h2><p class=muted>Disruption caused by planned work (technician visits, reboots I started, changes to my own router or wiring) or by power failures at my home is not counted above, from the start of the work until the line settled. What those windows contained:</p><table><tr><th>Window</th><th>Work</th><th class=n>Samples</th><th class=n>T3/T4</th><th class=n>Uncorrectables</th><th class=n>Unreachable</th><th class=n>Reboots / re-reg.</th></tr>"+D.excluded.map(w=>"<tr><td>"+w.start+" to "+(w.end.slice(0,10)===w.start.slice(0,10)?w.end.slice(11):w.end)+"</td><td>"+esc(w.type)+": "+esc(w.note.length>80?w.note.slice(0,80)+"\u2026":w.note)+"</td><td class=n>"+w.samples+"</td><td class=n>"+w.t34+"</td><td class=n>"+f(w.uncorr)+"</td><td class=n>"+w.down+"</td><td class=n>"+w.reb+" / "+w.rel+"</td></tr>").join("")+"</table>"}
 else if(!D.exclude_work)h+="<p class=muted>All recorded data is counted, including any disruption caused by planned work.</p>";
 if(D.outages.length)h+="<h2>Outages</h2><table><tr><th>Start</th><th class=n>About (min)</th><th>Detail</th></tr>"+D.outages.map(o=>"<tr><td>"+o.start+"</td><td class=n>"+o.mins+"</td><td>"+esc(o.why)+"</td></tr>").join("")+"</table>";
 if(D.t34.length)h+="<h2>Timeouts logged by the modem"+(T.T3+T.T4>D.t34.length?" (latest "+D.t34.length+")":"")+"</h2><table><tr><th>Time</th><th>Type</th><th>Modem log message</th></tr>"+D.t34.map(e=>"<tr><td>"+e.time+"</td><td>"+e.type+"</td><td>"+esc(e.msg)+"</td></tr>").join("")+"</table>";

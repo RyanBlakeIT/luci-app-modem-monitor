@@ -143,7 +143,7 @@ modem-monitor update-install                # download (verified) and install it
 modem-monitor update-status                 # progress of a running install
 ```
 
-Maintenance types: `tech`, `isp-call`, `outage`, `modem-reboot`, `router-change`, `wiring`, `other`. Confirmed `tech`, `modem-reboot`, `router-change` and `wiring` entries count as planned work and are left out of the complaint summary.
+Maintenance types: `tech`, `isp-call`, `outage`, `modem-reboot`, `router-change`, `wiring`, `power`, `other`. Confirmed `tech`, `modem-reboot`, `router-change` and `wiring` entries (planned work) and `power` entries (power failure at home) are left out of the complaint summary and credit letter. `outage` entries always count.
 
 ## Data and privacy
 

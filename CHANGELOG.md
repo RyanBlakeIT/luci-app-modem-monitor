@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.2
+- **New entry type: Power outage (home)** (`power`). A modem that restarted because the house lost power isn't the ISP's fault. Like planned work, confirmed power outages are left out of the complaint summary and credit letter, which list them under "Left out of the counts" and mention power failures at home.
+- **Power cuts are detected automatically.** When the router and the modem both restart within 15 minutes, the Maintenance Log gets a suggested **Power outage at home?** entry to confirm. The router's reboot is held for a few minutes first, because the modem comes back after the router.
+- **Fixed: an unexplained modem reboot was suggested as "Modem reboot",** the type for reboots you started, which counts as planned work once confirmed. It's now suggested as **Outage** ("Modem rebooted on its own"), so it counts against the ISP, with a hint to change it to Power outage (home) if the power went out. A router reboot with no modem reboot after it is still suggested as "Router rebooted".
+
 ## 1.7.1
 - **Fixed: the outdoor temperature chart showed no line in the 24-hour view.** Weather readings are 30 minutes apart, but the chart broke lines at gaps over 15 minutes, so no two points connected. Each series now carries its own spacing. Charts also draw a dot for any point with no neighbor close enough to join, so a chart with data can't look empty.
 

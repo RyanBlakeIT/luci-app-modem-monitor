@@ -11,6 +11,7 @@ var TYPES = [
 	[ 'modem-reboot', _('Modem reboot') ],
 	[ 'router-change', _('Router change') ],
 	[ 'wiring', _('Wiring / attenuation change') ],
+	[ 'power', _('Power outage (home)') ],
 	[ 'other', _('Other') ]
 ];
 
