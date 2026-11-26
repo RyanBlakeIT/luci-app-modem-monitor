@@ -77,6 +77,8 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command "$PROG" daemon
+	# restart when the settings change (Save & Apply); the daemon reads them at start
+	procd_set_param file /etc/config/modem_monitor
 	procd_set_param respawn 3600 10 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1

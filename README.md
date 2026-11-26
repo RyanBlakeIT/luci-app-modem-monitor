@@ -91,6 +91,8 @@ Everything is in UCI (`/etc/config/modem_monitor`) and on the Settings page. To 
 | `backup_enabled`, `backup_dest`, `backup_ssh_key`, `backup_hour` | `0`, —, `/root/.ssh/id_dropbear`, `3` | Nightly backup to a folder or `user@host:/path` |
 | `speedtest_enabled`, `speedtest_hour`, `speedtest_seconds`, `speedtest_max_mb`, `speedtest_url` | `0`, `3`, `10`, `250`, Cloudflare | Daily speed test (uses data) |
 | `plan_down`, `plan_up` | — | Your plan speeds in Mb/s, for comparison |
+| `nice` | `10` | CPU priority of the monitor and everything it starts (0 normal … 19 lowest) |
+| `cpu_affinity` | *(any)* | Cores to run on, e.g. `2 3` to stay off the cores that handle network traffic |
 | `compress_old` | `1` | gzip monthly files older than last month |
 | `wan_device` | *(auto)* | Modem-facing port; auto = device of the `wan` interface |
 | `modem_route` | `host` | How the router reaches the modem: `host` route, `alias` address, or `off` |

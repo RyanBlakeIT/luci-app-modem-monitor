@@ -525,6 +525,22 @@ return view.extend({
 		o.default = '1';
 		o.rmempty = false;
 
+		o = s.option(form.ListValue, 'nice', _('CPU priority'),
+			_('How the monitor (and the pings, path traces and speed tests it starts) shares the CPU with routing. Low means anything else on the router always goes first.'));
+		o.value('0', _('Normal'));
+		o.value('5', _('Lower'));
+		o.value('10', _('Low (recommended)'));
+		o.value('19', _('Lowest'));
+		o.default = '10';
+
+		o = s.option(form.Value, 'cpu_affinity', _('Run on CPU cores'),
+			_('Optional. Keeps the monitor on these cores only, for example <code>2 3</code> on a 4-core router whose cores 0 and 1 handle network traffic (see which cores your network interrupts use in <code>/proc/interrupts</code>). Empty: any core. Takes effect when the service restarts (Save & Apply).'));
+		o.placeholder = _('any');
+		o.datatype = 'string';
+		o.validate = function(id, v) {
+			return (!v || /^\s*\d+([\s,]+\d+)*\s*$/.test(v)) ? true : _('Core numbers separated by spaces, e.g. 2 3');
+		};
+
 		o = s.option(form.Value, 'wan_device', _('Modem-facing network port'),
 			_('Error and link-drop counters are recorded for this port. Leave empty to use the device of the "wan" interface.'));
 		o.placeholder = _('auto (wan interface)');

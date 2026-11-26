@@ -55,7 +55,7 @@ import urllib.request
 import zipfile
 from datetime import datetime, timedelta
 
-VERSION = "1.7.3"
+VERSION = "1.7.4"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -79,6 +79,8 @@ DEFAULTS = {
     "ds_snr_min": "33",
     "timeout": "15",
     "compress_old": "1",
+    "nice": "10",               # CPU priority of the monitor (0 normal .. 19 lowest): routing comes first
+    "cpu_affinity": "",         # optional cores to run on, e.g. "2 3" to stay off the networking cores
     "hires_ping": "0",          # 1 ping per second for jitter / short dropouts
     "hires_target": "gateway",  # "gateway" (ISP first hop) or an address
     "hires_drop_min": "2",      # lost pings in a row that count as a dropout
@@ -4630,10 +4632,37 @@ def test(cfg, raw=False):
 
 # --------------------------------------------------------------------------
 
+def set_cpu(cfg):
+    """Low priority (and optionally fixed cores) for the monitor and everything
+    it starts (pings, MTR, speed tests), so it never competes with routing."""
+    msg = []
+    try:
+        n = max(0, min(19, int(fnum(cfg, "nice"))))
+        if n > os.nice(0):
+            os.nice(n - os.nice(0))
+        if os.nice(0):
+            msg.append("nice %d" % os.nice(0))
+    except (OSError, ValueError) as e:
+        log("could not lower priority: %s" % e)
+    want = (cfg.get("cpu_affinity") or "").replace(",", " ").split()
+    if want and hasattr(os, "sched_setaffinity"):
+        try:
+            cpus = {int(c) for c in want} & set(range(os.cpu_count() or 1))
+            if cpus:
+                os.sched_setaffinity(0, cpus)
+                msg.append("cores %s" % ",".join(str(c) for c in sorted(cpus)))
+            else:
+                log("cpu_affinity %r matches no core on this router (cores 0-%d)" % (cfg["cpu_affinity"], (os.cpu_count() or 1) - 1))
+        except (OSError, ValueError) as e:
+            log("could not set cpu_affinity %r: %s" % (cfg.get("cpu_affinity"), e))
+    return ", ".join(msg)
+
+
 def daemon(cfg):
+    cpu = set_cpu(cfg)
     interval = max(60, int(fnum(cfg, "interval")))
     rep_every = max(60, int(fnum(cfg, "report_interval")))
-    log("started v%s, polling %s every %ds" % (VERSION, cfg["host"], interval))
+    log("started v%s, polling %s every %ds%s" % (VERSION, cfg["host"], interval, (" (%s)" % cpu) if cpu else ""))
     last_rep = 0
     last_prune = 0
     last_upd = time.time() - 6 * 3600 + 600  # first check ~10 min after start
@@ -4821,6 +4850,7 @@ def main():
         print(json.dumps({"rows": [{k: r.get(k, "") for k in SPEED_COLS} for r in reversed(rows)],
                           "next": nxt, "running": running}))
     elif cmd == "speedtest":
+        set_cpu(cfg)
         if "--background" in args:
             subprocess.Popen([sys.executable, os.path.abspath(__file__), "speedtest"], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)

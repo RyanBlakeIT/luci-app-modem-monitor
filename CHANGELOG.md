@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.4
+- **Fixed: Save & Apply now restarts the monitor.** The background service reads its settings when it starts, but changing them didn't restart it (OpenWrt saw an unchanged start command). Settings used by the service could wait until the next reboot: alert channels, the 1-second probe, sample interval, daily summary, backups and speed-test schedule. The service now restarts whenever its config file changes. The report and buttons always read fresh settings and were not affected.
+- **Low CPU priority by default** (Settings → Storage & pings → CPU priority, `nice` 10): the monitor and everything it starts (pings, MTR, speed tests) yield to routing and anything else on the router.
+- **Optional CPU pinning** (`cpu_affinity`, e.g. `2 3`): keep the monitor off the cores that handle network traffic. Child processes inherit it. Core numbers that don't exist are ignored, with a log message.
+
 ## 1.7.3
 - **Fixed: a report interval equal to the sample interval rebuilt only every other sample.** For example, 300 s / 300 s gave a new report every 10 minutes, not 5. The rebuild timer now counts from the start of each cycle with a little slack, so the report is rebuilt right after each sample when the intervals match. Each cycle still takes the sample first, then rebuilds the report.
 
