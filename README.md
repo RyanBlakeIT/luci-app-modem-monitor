@@ -137,6 +137,7 @@ modem-monitor alert-test                    # send a test notification to every 
 modem-monitor credit [--month YYYY-MM] [--json]   # credit-request letter / outage totals
 modem-monitor backup                        # copy the data off the router now
 modem-monitor speedtest [--background]      # run a speed test now
+modem-monitor trace [--status] [--json]     # run a path trace now (MTR if installed), or show which tool is used
 modem-monitor digest [--day YYYY-MM-DD] [--send]   # the daily summary (default: yesterday)
 modem-monitor compress                      # gzip monthly files older than last month (also daily)
 modem-monitor export [--full]               # one .zip; --full keeps MAC/public IP addresses

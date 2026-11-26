@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.0
+- **Speed tests, redesigned:**
+  - A summary row: latest result, median down/up (and % of plan), median latency idle → under load, and how many tests were below 80% of plan.
+  - One bar pair per test instead of dots on a time line, at least the last 14 tests.
+  - With plan speeds set, each test is shown as a % of plan, so download and upload share one honest scale, with plan, 80% and SQM reference lines. Without them, separate download and upload charts in Mb/s.
+- **Speed tests are judged against your own traffic shaping:** the monitor reads enabled SQM limits and counts a test as low only below 80% of whichever is lower, the plan or the SQM rate. This applies on the report and in the complaint summary, so a router shaped below its plan no longer flags normal results.
+- **Path traces on Settings → Network & weather:** shows whether MTR is installed and used (or traceroute), plus **Run a path trace now**, which shows the per-hop table right away and saves it with the others. CLI: `modem-monitor trace [--status] [--json]`.
+- **Latest speed test on the Overview tile and in the daily summary.**
+- **Quick-log buttons on the Maintenance tab:** Outage now, Power outage (home) now, Call with ISP now, Wiring change now. Each fills in the form with the type and the current time.
+
 ## 1.7.4
 - **Fixed: Save & Apply now restarts the monitor.** The background service reads its settings when it starts, but changing them didn't restart it (OpenWrt saw an unchanged start command). Settings used by the service could wait until the next reboot: alert channels, the 1-second probe, sample interval, daily summary, backups and speed-test schedule. The service now restarts whenever its config file changes. The report and buttons always read fresh settings and were not affected.
 - **Low CPU priority by default** (Settings → Storage & pings → CPU priority, `nice` 10): the monitor and everything it starts (pings, MTR, speed tests) yield to routing and anything else on the router.
