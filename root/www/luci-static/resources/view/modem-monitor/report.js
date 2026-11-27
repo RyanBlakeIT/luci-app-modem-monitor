@@ -6,10 +6,23 @@
 var REPORT = '/modem-monitor/index.html';
 var BIN = '/usr/bin/modem-monitor';
 
+/* The generated report translates itself to Chinese; pass the language LuCI is
+   actually rendered in so the iframe follows the UI language immediately,
+   without waiting for the next report rebuild. */
+function reportUrl(extra) {
+	var lang = (document.documentElement.lang || '').toLowerCase();
+	var q = [];
+	if (lang)
+		q.push('lang=' + (lang.indexOf('zh') === 0 ? 'zh' : 'en'));
+	if (extra)
+		q.push(extra);
+	return REPORT + (q.length ? '?' + q.join('&') : '');
+}
+
 function reloadFrame() {
 	var f = document.getElementById('mm-frame');
 	if (f)
-		f.src = REPORT + '?t=' + Date.now();
+		f.src = reportUrl('t=' + Date.now());
 	else
 		location.reload();
 }
@@ -61,6 +74,15 @@ function exec(args) {
 	});
 }
 
+/* Split only after translating the complete sentence, so the link can be
+   placed wherever the target language needs it. */
+function linkedText(msg, link) {
+	var parts = msg.split('%s');
+	if (parts.length < 2)
+		return [ msg ];
+	return [ parts[0], link, parts.slice(1).join('%s') ];
+}
+
 return view.extend({
 	load: function() {
 		return Promise.all([
@@ -86,7 +108,7 @@ return view.extend({
 			reloadFrame();
 		}).catch(function(e) {
 			ui.hideModal();
-			ui.addNotification(null, E('p', {}, _('Command failed: ') + e.message), 'danger');
+			ui.addNotification(null, E('p', {}, _('Command failed: %s').format(e.message)), 'danger');
 		});
 	},
 
@@ -108,7 +130,7 @@ return view.extend({
 			ui.addNotification(null, E('p', {}, _('Downloaded %s (%s). MAC and public IP addresses are masked.').format(name, lines[0].replace(/^.*\(|\)$/g, ''))), 'info');
 		}).catch(function(e) {
 			ui.hideModal();
-			ui.addNotification(null, E('p', {}, _('Export failed: ') + e.message), 'danger');
+			ui.addNotification(null, E('p', {}, _('Export failed: %s').format(e.message)), 'danger');
 		});
 	},
 
@@ -205,10 +227,9 @@ return view.extend({
 		if (!u || !u.newer) return '';
 		var self = this;
 		return E('div', { 'class': 'alert-message notice', 'style': 'display:flex;align-items:center;gap:12px;flex-wrap:wrap' }, [
-			E('div', { 'style': 'flex:1;min-width:240px' }, [
-				E('strong', {}, _('Update available: version %s').format(u.latest)), ' ',
-				E('span', {}, _('(installed: %s)').format(u.current))
-			]),
+			E('div', { 'style': 'flex:1;min-width:240px' },
+				E('strong', {}, _('Update available: version %s (installed: %s)').format(u.latest, u.current))
+			),
 			E('button', { 'class': 'btn cbi-button', 'click': function() { self.showNotes(u, false); } }, _("What's new")),
 			E('button', { 'class': 'btn cbi-button cbi-button-positive', 'click': function() { self.showNotes(u, true); } }, _('Install update'))
 		]);
@@ -219,7 +240,7 @@ return view.extend({
 		var body = [
 			E('p', {}, (u.releases && u.releases.length > 1)
 				? _('Version %s (installed: %s). This update includes %d releases; changes in each are listed below, newest first.').format(u.latest, u.current, u.releases.length)
-				: _('Version %s (installed: %s). ').format(u.latest, u.current)),
+				: _('Version %s (installed: %s).').format(u.latest, u.current)),
 			notesNode(u.notes),
 			E('p', {}, E('a', { 'href': u.url, 'target': '_blank', 'rel': 'noopener' }, _('Open the release on GitHub')))
 		];
@@ -246,8 +267,8 @@ return view.extend({
 					? E('strong', {}, _('Version %s is installed.').format(u.latest))
 					: E('strong', {}, _('The update was not installed.'))),
 				E('p', { 'style': 'font-size:14px' }, ok
-					? (/signature required/.test(text) ? _('The download matched GitHub\'s published checksum and carried a valid project signature. ') : _('The download matched GitHub\'s published checksum. ')) +
-					  _('Your settings and data are unchanged. Reload the page to use the new version; if a tab looks out of date, log out of LuCI and back in.')
+					? ((/signature required/.test(text) ? _('The download matched GitHub\'s published checksum and carried a valid project signature.') : _('The download matched GitHub\'s published checksum.')) + ' ' +
+					  _('Your settings and data are unchanged. Reload the page to use the new version; if a tab looks out of date, log out of LuCI and back in.'))
 					: _('Nothing was changed if the download or signature check failed. The log below says why. You can also install manually from the release page.')),
 				E('details', ok ? {} : { 'open': 'open' }, [
 					E('summary', { 'style': 'cursor:pointer;font-size:14px' }, _('Installation log')),
@@ -282,10 +303,10 @@ return view.extend({
 	maintNotice: function(entries) {
 		var nsug = entries.filter(function(m) { return m.status === 'suggested'; }).length;
 		var link = E('a', { 'href': L.url('admin/status/modem-monitor/maintenance') }, _('Maintenance Log'));
-		return E('div', { 'class': nsug ? 'alert-message notice' : '', 'style': nsug ? '' : 'margin:4px 0 10px;opacity:.85' }, nsug
-			? [ _('%d automatic maintenance suggestion(s) to review on the ').format(nsug), link, _(' tab.') ]
-			: [ _('%d maintenance log entr%s. Add or edit them on the ').format(entries.length, entries.length === 1 ? 'y' : 'ies'), link,
-				_(' tab; the report can show only data after any entry ("Show data since").') ]);
+		var msg = nsug
+			? N_(nsug, '%d automatic maintenance suggestion to review on the %s tab.', '%d automatic maintenance suggestions to review on the %s tab.').replace('%d', nsug)
+			: N_(entries.length, '%d maintenance log entry. Add or edit it on the %s tab; the report can show only data after any entry ("Show data since").', '%d maintenance log entries. Add or edit them on the %s tab; the report can show only data after any entry ("Show data since").').replace('%d', entries.length);
+		return E('div', { 'class': nsug ? 'alert-message notice' : '', 'style': nsug ? '' : 'margin:4px 0 10px;opacity:.85' }, linkedText(msg, link));
 	},
 
 	render: function(data) {
@@ -312,7 +333,7 @@ return view.extend({
 				'class': 'btn cbi-button',
 				'click': ui.createHandlerFn(this, 'creditLetter')
 			}, _('Credit letter')), ' ',
-			E('a', { 'class': 'btn cbi-button', 'href': REPORT, 'target': '_blank' }, _('Open in new tab')), ' ',
+			E('a', { 'class': 'btn cbi-button', 'href': reportUrl(), 'target': '_blank' }, _('Open in new tab')), ' ',
 			E('button', {
 				'class': 'btn cbi-button cbi-button-negative', 'style': 'float:right',
 				'click': ui.createHandlerFn(this, 'rebootModem')
@@ -322,7 +343,7 @@ return view.extend({
 		var body;
 		if (hasReport) {
 			body = E('iframe', {
-				'id': 'mm-frame', 'src': REPORT, 'title': _('Cable modem signal report'),
+				'id': 'mm-frame', 'src': reportUrl(), 'title': _('Cable modem signal report'),
 				'style': 'width:100%;height:1800px;border:0;border-radius:8px;',
 				'load': function(ev) {
 					try {

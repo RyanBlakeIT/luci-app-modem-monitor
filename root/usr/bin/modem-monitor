@@ -2349,12 +2349,548 @@ def build_report(cfg):
     data["files"] = files
 
     page = HTML.replace("/*__DATA__*/null", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    if "</body>" in page:
+        page = page.replace("</body>", report_i18n_script() + "</body>", 1)
     tmp = os.path.join(web, "index.html.tmp")
     with open(tmp, "w") as f:
         f.write(page)
     os.chmod(tmp, 0o644)
     os.replace(tmp, os.path.join(web, "index.html"))
     return os.path.join(web, "index.html")
+
+
+# Chinese (Simplified) UI strings for the generated HTML report. The report is
+# a self-contained page rendered by the browser, so LuCI's .lmo translations
+# cannot reach it; instead these pairs are embedded in the page and applied to
+# visible text client-side (see report_i18n_script). Entries starting with
+# "re:" are regular expressions (use capture groups in the replacement);
+# everything else is a literal substring with automatic ASCII-word boundary
+# protection. Ordered longest-first at runtime.
+REPORT_I18N_ZH = [
+    # Page structure and section headers
+    ["Cable modem signal report", "电缆调制解调器信号报告"],
+    ["Time range", "时间范围"],
+    ["Show data since", "显示起始记录"],
+    ["All data", "全部数据"],
+    ["Show all data", "显示全部数据"],
+    ["Daily summary (last 30 days)", "每日汇总（近 30 天）"],
+    ["Daily summary (since the selected entry)", "每日汇总（自所选记录起）"],
+    ["Downstream errors by channel", "按下行信道统计的错误"],
+    ["RF ingress", "射频入侵"],
+    ["Incidents", "事件"],
+    ["Outages by month", "按月统计断网"],
+    ["Maintenance Log", "维护日志"],
+    ["Maintenance log", "维护日志"],
+    ["Modem event log", "调制解调器事件日志"],
+    ["Path traces during packet loss", "丢包期间的路径跟踪"],
+    ["Raw data (CSV)", "原始数据（CSV）"],
+    ["Speed tests", "速度测试"],
+    ["Credit letter", "补偿申请信"],
+    ["Download all data", "下载全部数据"],
+    # Section descriptions (text fragments split by inline markup)
+    ["Counts from the modem event log and from this router's polls. Rows with trouble are marked.",
+     "统计来自调制解调器事件日志和本路由器的轮询。有问题的行会被标记。"],
+    ["Uncorrectable codewords per downstream channel (rows, by frequency) over time (columns). Darker = more errors. Errors confined to a few adjacent rows usually mean",
+     "下行各信道（按频率排列为行）随时间（列）变化的不可纠错码字。颜色越深错误越多。错误集中在少数相邻行通常意味着"],
+    [": an outside signal leaking into the cable through a damaged line, loose connector or bad tap. Errors across every row point to wideband noise or weak signal.",
+     "：外部信号通过受损线路、松动接头或不良分支器漏入电缆。所有行都有错误则指向宽带噪声或信号过弱。"],
+    ["Times the modem couldn't be reached, pings failed completely, or the modem rebooted.",
+     "调制解调器无法访问、ping 完全失败或调制解调器重启的记录。"],
+    ["Outages (modem unreachable or no traffic getting through) and modem re-registrations, leaving out planned work: technician visits, reboots you started, and router or wiring changes. Use",
+     "断网（调制解调器不可达或流量完全中断）与调制解调器重新注册，已排除计划内工作：技术人员上门、你主动发起的重启以及路由器或线路变更。使用"],
+    ["Repairs, calls, reboots and router changes, numbered to match the dashed markers on the charts. \"Before\" and \"after\" are the 24 hours on each side (median power range, uncorrectables per day, T3/T4 timeouts, upstream power warnings). Add or edit entries on the router's",
+     "维修、通话、重启和路由器变更，编号与图表上的虚线标记一致。“之前”和“之后”指两侧各 24 小时（功率中位范围、每日不可纠错、T3/T4 超时、上行功率警告）。在路由器的"],
+    ["New log entries collected since monitoring began. Login entries from this monitor are hidden.",
+     "自监控开始以来收集的新日志条目。本监控产生的登录条目已隐藏。"],
+    ["Saved automatically when pings lose packets (at most every 15 minutes), with MTR when the",
+     "ping 丢包时自动保存（最多每 15 分钟一次），当"],
+    ["Download these and attach them to a complaint or ticket. To get everything in one file, use",
+     "下载这些文件并附在投诉或工单中。要获取单个完整文件，请使用"],
+    ["on the router's Cable Modem page for a request letter.",
+     "在路由器的“电缆调制解调器”页面生成申请信。"],
+    ["on the router's Cable Modem page, or run",
+     "在路由器的“电缆调制解调器”页面操作，或运行"],
+    ["package is installed (loss and latency per hop over several rounds), otherwise traceroute.",
+     "软件包已安装时使用 MTR（多轮测量每跳丢包和延迟），否则使用 traceroute。"],
+    ["tab or with", "标签页中添加或编辑记录，或使用"],
+    # Chart titles, units and notes
+    ["Upstream transmit power", "上行发射功率"],
+    ["Per channel. Power climbing toward the top of the range usually means signal loss in the line or tap. Above the range means the modem is shouting to be heard.",
+     "按信道显示。功率攀升至区间顶部通常意味着线路或分支器信号衰减。超出区间意味着调制解调器在“大声喊叫”才能被听到。"],
+    ["Downstream SNR", "下行 SNR"],
+    ["SC-QAM channels. Dips below the line indicate noise on the line.", "SC-QAM 信道。低于参考线表示线路上有噪声。"],
+    ["Downstream receive power", "下行接收功率"],
+    ["Highest and lowest channel.", "最高与最低信道。"],
+    ["Uncorrectable codewords", "不可纠错码字"],
+    ["Data the modem received too damaged to repair. Spikes line up with noise or ingress.", "调制解调器接收到但损坏到无法修复的数据。尖峰与噪声或入侵对应。"],
+    ["Packet loss", "丢包"],
+    ["Pings from this router to the internet and to the ISP’s gateway (the first hop past the modem). Loss to the gateway too means the problem is on the local cable segment; loss only further out is beyond it.",
+     "从本路由器到互联网以及到运营商网关（调制解调器之后第一跳）的 ping。网关也丢包意味着问题在本地电缆区段；只有更远端丢包则问题在其之外。"],
+    ["Pings from this router to the internet and to ", "从本路由器到互联网以及到"],
+    ["Ping latency", "ping 延迟"],
+    ["Average round-trip time to the internet and to the ISP gateway.", "到互联网和运营商网关的平均往返时间。"],
+    ["Router–modem Ethernet errors", "路由器–调制解调器以太网错误"],
+    ["CRC, alignment and collision counters on the router's WAN port. Should stay at zero; errors here point to the router–modem cable or ports, not your ISP.",
+     "路由器 WAN 端口的 CRC、对齐和冲突计数器。应保持为零；这里的错误指向路由器–调制解调器之间的线缆或端口，而非运营商。"],
+    ["Router NIC missed packets", "路由器网卡遗漏数据包"],
+    ["Packets the router's WAN port dropped because its receive buffer filled (router CPU/IRQ load). A router tuning issue, not a line or cable fault.",
+     "路由器 WAN 端口因接收缓冲区满（路由器 CPU/IRQ 负载）而丢弃的数据包。这是路由器调优问题，不是线路或电缆故障。"],
+    ["Short dropouts", "短暂中断"],
+    ["From one ping per second to ", "来自每秒一次 ping，目标为"],
+    ["Jitter and worst latency", "抖动与最差延迟"],
+    ["From the 1-second pings: p95 is the latency the slowest 5% of pings exceeded; jitter is the average change between consecutive pings.",
+     "来自 1 秒 ping：p95 是最慢 5% 的 ping 超过的延迟；抖动是相邻 ping 之间的平均变化。"],
+    ["Outdoor temperature", "室外温度"],
+    ["per interval", "每间隔"],
+    # Series names
+    ["re:^Ch (\\d+)$", "信道 $1"],
+    ["Highest channel", "最高信道"],
+    ["Lowest channel", "最低信道"],
+    ["Average", "平均"],
+    ["Internet", "互联网"],
+    ["ISP gateway (first hop)", "运营商网关（第一跳）"],
+    ["Worst 5% latency (p95)", "最差 5% 延迟（p95）"],
+    ["Jitter", "抖动"],
+    ["Link errors", "链路错误"],
+    ["Missed packets", "遗漏数据包"],
+    # Tiles and their notes
+    ["T3 timeouts", "T3 超时"],
+    ["T4 timeouts", "T4 超时"],
+    ["upstream ranging failures", "上行测距失败"],
+    ["modem lost contact, reset", "调制解调器失去联系并复位"],
+    ["Upstream power warnings", "上行功率警告"],
+    ["dynamic range window violations", "动态范围窗口违规"],
+    ["damaged downstream data", "受损的下行数据"],
+    ["Peak upstream power", "峰值上行功率"],
+    ["Re-registrations", "重新注册"],
+    ["Reboots", "重启"],
+    ["uptime reset", "运行时间重置"],
+    ["lost signal, no reboot", "信号丢失，未重启"],
+    ["Samples with missing channels", "信道缺失的采样"],
+    ["Samples with packet loss", "有丢包的采样"],
+    ["partial service", "部分服务异常"],
+    ["receive-buffer overruns", "接收缓冲区溢出"],
+    ["over 100 in one sample: router tuning", "单次采样超过 100：路由器调优问题"],
+    # Table headers
+    ["re:^Day$", "日期"],
+    ["Sync loss", "同步丢失"],
+    ["DHCP/provisioning fail", "DHCP/配置失败"],
+    ["Power range (DRW)", "功率范围（DRW）"],
+    ["Uncorrectables", "不可纠错"],
+    ["Peak US power", "峰值上行功率"],
+    ["re:^Re-reg\\.$", "重新注册"],
+    ["re:^Unreachable$", "不可达"],
+    ["Loss samples", "丢包采样"],
+    ["Link drops", "链路断开"],
+    ["NIC missed", "网卡遗漏"],
+    ["re:^Samples$", "采样数"],
+    ["re:^Month$", "月份"],
+    ["re:^Outages$", "断网"],
+    ["re:^Minutes$", "分钟"],
+    ["Re-registrations / reboots", "重新注册/重启"],
+    ["re:^Start$", "开始"],
+    ["re:^End$", "结束"],
+    ["About (min)", "时长约（分钟）"],
+    ["What happened", "发生了什么"],
+    ["re:^Time$", "时间"],
+    ["re:^Type$", "类型"],
+    ["re:^Message$", "内容"],
+    ["re:^When$", "时间"],
+    ["24 h before", "之前 24 小时"],
+    ["24 h after", "之后 24 小时"],
+    ["re:^Hop$", "跳"],
+    ["re:^Host$", "主机"],
+    ["re:^Loss$", "丢包"],
+    ["re:^Sent$", "已发送"],
+    ["Avg ms", "平均 ms"],
+    ["re:^Best$", "最佳"],
+    ["re:^Worst$", "最差"],
+    ["Credit (prorated / per day)", "补偿（按比例/每天）"],
+    ["Days affected", "受影响天数"],
+    # Status line and banners
+    ["re:^Newest sample (.+?) · report built (.+?) · (.+?) firmware (.+?) · a sample every (\\d+) min, report rebuilt every (\\d+) min$",
+     "最新采样 $1 · 报告生成于 $2 · $3 固件 $4 · 每 $5 分钟采样，每 $6 分钟重建报告"],
+    [" firmware ", " 固件 "],
+    ["No samples yet", "暂无采样"],
+    ["No data yet.", "暂无数据。"],
+    ["No data files yet.", "暂无数据文件。"],
+    ["No samples in this period yet.", "此时间段内暂无采样。"],
+    ["re:Dashed lines on the charts mark (\\d+) maintenance log entr(?:y|ies) \\(numbers match the Maintenance log below\\)\\. Hover a chart for details\\.",
+     "图表上的虚线标记了 $1 条维护日志记录（编号与下方维护日志一致）。悬停图表查看详情。"],
+    ["Showing only data after ", "仅显示记录 "],
+    [". Counts, charts and tables start at ", " 之后的数据。统计、图表和表格自 "],
+    ["re:^(\\d+) maintenance log entr(?:y|ies)", "$1 条维护日志记录"],
+    ["since the selected entry", "自所选记录起"],
+    ["(numbers match the Maintenance log below). Hover a chart for details.", "（编号与下方维护日志一致）。悬停图表查看详情。"],
+    # Ingress analysis
+    ["No day in this range had 1,000+ uncorrectables, so there is no error pattern to judge.",
+     "此范围内没有任何一天超过 1,000 个不可纠错，因此无法判断错误模式。"],
+    ["re:Likely ingress on (\\d+) days?", "可能有 $1 天存在射频入侵"],
+    [": most errors were on 3 adjacent channels.", "：大多数错误集中在 3 个相邻信道。"],
+    ["Spread across the band", "遍布整个频段"],
+    ["re: on OFDM$", " 个在 OFDM 上"],
+    [" uncorrectables", " 个不可纠错"],
+    [" uncorr/day · ", " 不可纠错/天 · "],
+    # Incidents and outage reasons
+    ["Modem unreachable", "调制解调器不可达"],
+    ["Lost signal / re-registered (no modem reboot; uptime kept counting)", "信号丢失/重新注册（调制解调器未重启；运行时间持续累计）"],
+    ["Modem rebooted (uptime reset)", "调制解调器已重启（运行时间重置）"],
+    ["Modem lost signal and re-registered (no reboot; uptime kept counting)", "调制解调器丢失信号并重新注册（未重启；运行时间持续累计）"],
+    ["re:^Modem status page didn't answer, but the internet was working \\((\\d+)% ping loss\\): not an outage$",
+     "调制解调器状态页无响应，但互联网正常（ping 丢包 $1%）：不算断网"],
+    ["re:^Channels missing: (\\d+) of (\\d+) downstream, (\\d+) of (\\d+) upstream locked$",
+     "信道缺失：下行 $2 个中仅锁定 $1 个，上行 $4 个中仅锁定 $3 个"],
+    ["re:^(\\d+) short dropouts? \\(longest (\\d+) s\\) in 1-second pings$",
+     "1 秒 ping 中出现 $1 次短暂中断（最长 $2 秒）"],
+    ["re:^Router-to-modem Ethernet link \\((.+?)\\) went down (\\d+) times?$",
+     "路由器到调制解调器的以太网链路（$1）断开 $2 次"],
+    ["re:^Link speed on (.+?) changed to (.+?) Mb/s$", "$1 的链路速率变为 $2 Mb/s"],
+    ["re:^(\\d+) Ethernet errors? on (.+?) \\(CRC/alignment/collisions\\)$",
+     "$2 上发生 $1 次以太网错误（CRC/对齐/冲突）"],
+    ["re:^(\\d+) packets missed by (.+?) \\(NIC receive overrun: router CPU/buffer, not the cable\\)$",
+     "$2 遗漏 $1 个数据包（网卡接收溢出：路由器 CPU/缓冲区问题，而非电缆）"],
+    ["100% packet loss", "100% 丢包"],
+    # Maintenance entry types (rendered as bare words)
+    ["re:^\\s*tech\\s*$", "技术人员上门"],
+    ["re:(after #\\d+ )tech( –)", "$1技术人员上门$2"],
+
+    ["re:^\\s*isp-call\\s*$", "致电运营商"],
+    ["re:(after #\\d+ )isp-call( –)", "$1致电运营商$2"],
+
+    ["re:^\\s*outage\\s*$", "断网"],
+    ["re:(after #\\d+ )outage( –)", "$1断网$2"],
+
+    ["re:^\\s*modem-reboot\\s*$", "调制解调器重启"],
+    ["re:(after #\\d+ )modem-reboot( –)", "$1调制解调器重启$2"],
+
+    ["re:^\\s*router-change\\s*$", "路由器更换"],
+    ["re:(after #\\d+ )router-change( –)", "$1路由器更换$2"],
+
+    ["re:^\\s*wiring\\s*$", "线路/衰减变更"],
+    ["re:(after #\\d+ )wiring( –)", "$1线路/衰减变更$2"],
+
+    ["re:^\\s*power\\s*$", "家中停电"],
+    ["re:(after #\\d+ )power( –)", "$1家中停电$2"],
+
+    ["re:^\\s*other\\s*$", "其他"],
+    ["re:(after #\\d+ )other( –)", "$1其他$2"],
+
+    ["Modem reboots", "调制解调器重启"],
+    ["Lost signal / re-registered", "信号丢失/重新注册"],
+    ["after #", "自#"],
+    ["re:(\\d+) of (\\d+) samples", "$2 个采样中的 $1 个"],
+    ["(when it ended)", "（结束时）"],
+    ["Latest error: ", "最新错误："],
+    ["The first hops after this router belong to the ISP. Loss that starts at one hop and carries through to the destination is real; loss at a single middle hop with clean hops after it is usually that router deprioritizing pings to itself.",
+     "此路由器之后的最初几跳属于运营商。从某一跳开始一直持续到目标的丢包是真实丢包；只有中间某一跳丢包而其后各跳干净，通常是该路由器降低了回应 ping 的优先级。"],
+    ["re:(\\d+) per (\\d+) h", "每 $2 小时 $1 个"],
+    ["re:(\\d+) per day", "每天 $1 个"],
+    ["Mb/s down / up · ", "Mb/s 下行/上行 · "],
+    ["suggested", "建议"],
+    ["show data after this", "显示此之后的数据"],
+    ["Outages you logged for times before monitoring; not measured", "你记录的监控开始前的断网；未测量"],
+    # Speed tests
+    ["Measured from this router", "由本路由器测量"],
+    ["; the router’s traffic shaping (SQM ", "；路由器的流量整形（SQM "],
+    [") caps these results, so tests are judged against whichever is lower, the plan or the SQM limit.",
+     "）会限制测试结果，因此按套餐或 SQM 限制中较低者评判。"],
+    ["; traffic shaping on the router (SQM) caps these results.", "；路由器上的流量整形（SQM）会限制测试结果。"],
+    ["Set your plan speeds under Settings → Speed tests to compare each test with what you pay for.",
+     "在“设置 → 速度测试”中填写套餐速率，即可将每次测试与你付费的速率对比。"],
+    ["Below 80% of plan", "低于套餐 80%"],
+    ["Failed tests", "失败的测试"],
+    ["re:^Download$", "下载"],
+    ["re:^Upload$", "上传"],
+    ["Download % of plan", "下载占套餐 %"],
+    ["Upload % of plan", "上传占套餐 %"],
+    ["% of plan", "占套餐 %"],
+    ["Latency idle → load", "延迟 空闲 → 负载"],
+    ["no bufferbloat", "无缓冲膨胀"],
+    [" ms idle, ", " ms（空闲），"],
+    [" ms loaded", " ms（负载）"],
+    ["Median (", "中位数（"],
+    ["re:^Latest$", "最新"],
+    ["Last off-router backup: ", "上次离路由器备份："],
+    ["Off-router backup failed ", "离路由器备份失败 "],
+    # Path traces
+    ["re:loss starts at hop (\\d+)", "丢包从第 $1 跳开始"],
+    ["no loss reached the destination", "丢包未到达目标"],
+    # Heatmap legend
+    [" (log scale)", "（对数刻度）"],
+    # Event log severities kept as-is (log data). Misc
+    ["guideline max ", "指导上限 "],
+    ["ms (median) · ", "ms（中位数）· "],
+    ["from 1-second pings", "来自 1 秒 ping"],
+    ["re:^(\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d) to ", "$1 至 "],
+    ["re:^of (\\d+) samples", "/ $1 个采样"],
+    # ---- Complaint summary, credit letter and weather text ----
+    ["Print / Save as PDF", "打印 / 保存为 PDF"],
+    ["Service problem summary", "服务问题摘要"],
+    ["Cable internet service problems: summary", "电缆互联网服务问题：摘要"],
+    ["Period: ", "统计区间："],
+    ["re:^ to $", " 至 "],
+    ["re:(\\d{4}-\\d\\d-\\d\\d) to (\\d{4}-\\d\\d-\\d\\d)", "$1 至 $2"],
+    ["re:(\\d+) of (\\d+) days with data", "$2 天中 $1 天有数据"],
+    ["re: \\(data begins ([^)]+)\\)", "（数据始于 $1）"],
+    [" · generated ", " · 生成于 "],
+    [" · modem ", " · 调制解调器 "],
+    ["Days with problems", "有问题的天数"],
+    ["Unexplained modem reboots", "原因不明的调制解调器重启"],
+    ["re:^(\\d+) outages?, ~(\\d+) min$", "$1 次断网，约 $2 分钟"],
+    ["Service problems were recorded on ", "在有数据的"],
+    ["re:^(\\d+) of the (\\d+) days$", "$2 天中有 $1 天"],
+    [" with data.", "记录到服务问题。"],
+    ["The modem logged ", "调制解调器记录了"],
+    ["re:^ and $", "和"],
+    ["re:(\\d+) T3 timeouts?", "$1 次 T3 超时"],
+    ["re:(\\d+) T4 timeouts?", "$1 次 T4 超时"],
+    ["re:^\\. T3 means the modem's upstream ranging requests went unanswered; T4 means the (.+?) network stopped answering and the modem had to reset its connection\\. Both point to the cable plant \\(line, tap, node\\), not to the equipment in the home\\.$", "。T3 表示调制解调器的上行测距请求未获应答；T4 表示 $1 的网络停止应答，调制解调器不得不重置连接。两者都指向电缆设施（线路、分支器、节点），而非家中设备。"],
+    ["re:(\\d+) uncorrectable codewords", "$1 个不可纠错码字"],
+    [": downstream data that arrived too damaged to repair", "：损坏到无法修复的下行数据"],
+    ["re:, worst on (\\S+) \\((\\d+)\\)", "，最严重为 $1（$2 个）"],
+    ["re:^On $", "在"],
+    ["re:^(\\d+) days$", "$1 天"],
+    [" the errors were concentrated on a few adjacent channels (", "里，错误集中在少数相邻信道（"],
+    ["). Errors confined to a narrow band are typical of ", "）。集中在窄带的错误是典型的"],
+    [": an outside signal leaking into the cable through a damaged line, loose connector or faulty tap.", "：外部信号通过受损线路、松动接头或故障分支器漏入电缆。"],
+    ["Upstream transmit power reached ", "上行发射功率达到"],
+    ["re:, above the (\\S+) dBmV guideline, on (\\d+) days?: the modem had to transmit at or near its maximum to be heard, which suggests loss in the line or tap\\.", "，超过 $1 dBmV 指导值的情况出现在 $2 天：调制解调器不得不以接近最大功率发射才能被听到，说明线路或分支器存在衰减。"],
+    ["re:The modem rebooted (\\d+) times? on its own and lost signal and re-registered (\\d+) times? without rebooting\\.", "调制解调器自行重启 $1 次，丢失信号并重新注册（未重启）$2 次。"],
+    ["re:The modem rebooted (\\d+) times? on its own\\.", "调制解调器自行重启 $1 次。"],
+    ["re:The modem lost signal and re-registered (\\d+) times? without rebooting\\.", "调制解调器丢失信号并重新注册（未重启）$1 次。"],
+    ["re:\\((\\d+) planned reboots? listed below (?:is|are) not included\\.\\)", "（下方列出的 $1 次计划内重启未计入。）"],
+    ["re:In (\\d+) samples? with packet loss, pings to (.+?).s own gateway \\(the first hop past the modem\\) failed too, so the loss starts on the local cable segment, not further out on the internet\\.", "在 $1 个丢包采样中，到 $2 自身网关（调制解调器之后第一跳）的 ping 也失败了，说明丢包始于本地电缆区段，而非更远的互联网。"],
+    ["re:(\\d+) path traces? (?:was|were) saved during the loss\\.", "丢包期间保存了 $1 次路径跟踪。"],
+    ["re:(\\d+) path traces? (?:was|were) saved during packet loss\\.", "丢包期间保存了 $1 次路径跟踪。"],
+    ["re:Path traces \\(MTR\\) during packet loss: in (\\d+) of (\\d+) traces? the loss began at", "丢包期间的路径跟踪（MTR）：$2 次跟踪中有 $1 次丢包始于"],
+    ["re:^hop (\\d+)$", "第 $1 跳"],
+    [" and carried through to the destination", "并持续到目标"],
+    ["re:; that hop is inside (.+?).s network, right after the modem", "；该跳在 $1 的网络内部，紧邻调制解调器之后"],
+    [". Other starting points: ", "。其他起始点："],
+    ["re:hop (\\d+) \\((.+?)\\) ×(\\d+)", "第 $1 跳（$2）×$3"],
+    ["re:One ping per second to (.+?).s gateway recorded", "每秒一次到 $1 网关的 ping 记录了"],
+    ["re:(?<![#\\d])(\\d+) short dropouts?", "$1 次短暂中断"],
+    ["re:\\(2 or more seconds with no reply, longest (\\d+) s\\) on (\\d+) days?\\.", "（2 秒及以上无回应，最长 $1 秒），分布在 $2 天。"],
+    ["Interruptions this short are missed by ordinary checks but freeze calls, video and online games.", "这种短暂中断普通检查难以察觉，但会冻结通话、视频和在线游戏。"],
+    ["re:In (\\d+) samples? the modem was running on only part of its bonded channels \\(channels it normally holds had dropped\\), which lowers speed and reliability\\.", "在 $1 个采样中，调制解调器仅运行在部分绑定信道上（通常持有的信道已掉线），这会降低速度和可靠性。"],
+    ["re:(\\d+) speed tests? from the router: median (\\S+) Mb/s down and (\\S+) Mb/s up", "路由器发起的 $1 次速度测试：中位下行 $2 Mb/s，上行 $3 Mb/s"],
+    ["re:; (\\d+) of them below 80% of the plan speed \\(", "；其中 $1 次低于套餐速率的 80%（"],
+    ["re:(\\d+(?:\\.\\d+)?) down / (\\d+(?:\\.\\d+)?) up Mb/s", "下行 $1 / 上行 $2 Mb/s"],
+    ["re:(\\d+(?:\\.\\d+)?) down Mb/s", "下行 $1 Mb/s"],
+    ["re:(\\d+(?:\\.\\d+)?) up Mb/s", "上行 $1 Mb/s"],
+    ["re:, or of the router.s own traffic-shaping limit where that is lower", "，或路由器自身流量整形限制更低时按该限制"],
+    ["The router's own traffic shaping can cap these, so a low result is a lead rather than proof.", "路由器自身的流量整形可能限制这些结果，因此低结果只是线索而非证据。"],
+    ["re:(\\d+) outages? \\(modem unreachable or no internet\\), about (\\d+) minutes in total\\.", "$1 次断网（调制解调器不可达或互联网中断），累计约 $2 分钟。"],
+    ["re:The router recorded (\\d+) Ethernet errors on its connection to the modem\\.", "路由器在其与调制解调器的连接上记录了 $1 次以太网错误。"],
+    ["re:The router.s Ethernet connection to the modem recorded", "路由器与调制解调器的以太网连接"],
+    ["no errors", "无任何错误"],
+    [", which rules out the home router and the router–modem cable.", "，排除了家用路由器和路由器–调制解调器线缆的嫌疑。"],
+    ["No problems were recorded in this period.", "此期间未记录到问题。"],
+    ["Uncorrectable codewords per day", "每日不可纠错码字"],
+    ["T3 + T4 timeouts per day", "每日 T3 + T4 超时"],
+    ["re:^\\(count\\)$", "（次数）"],
+    ["re:Only days with problems are listed \\((\\d+)\\)\\.", "仅列出有问题的日子（$1 天）。"],
+    ["Re-reg. events", "重注册事件"],
+    ["Peak US dBmV", "峰值上行 dBmV"],
+    ["Unreachable samples", "不可达采样"],
+    ["re:^Pattern$", "模式"],
+    ["re:^ingress\\? (\\d+)% on (\\S+)–(\\S+) MHz$", "疑似入侵：$1% 集中在 $2–$3 MHz"],
+    ["spread across band", "遍布频段"],
+    ["modem log only", "仅调制解调器日志"],
+    ["no data", "无数据"],
+    ["Repairs, calls and changes", "维修、通话与变更"],
+    [" (auto-detected)", "（自动检测）"],
+    ["Left out of the counts", "未计入统计的部分"],
+    ["Disruption caused by planned work (technician visits, reboots I started, changes to my own router or wiring) or by power failures at my home is not counted above, from the start of the work until the line settled. What those windows contained:", "计划内工作（技术人员上门、我主动发起的重启、对自己路由器或线路的变更）或家中停电造成的中断，从工作开始直到线路恢复稳定，均未计入上方统计。这些时间窗内包含："],
+    ["All recorded data is counted, including any disruption caused by planned work.", "所有记录数据均计入统计，包括计划内工作造成的中断。"],
+    ["re:^Window$", "时间窗"],
+    ["re:^Work$", "工作内容"],
+    ["Reboots / re-reg.", "重启/重注册"],
+    ["re:^tech: ", "技术人员上门："],
+    ["re:^isp-call: ", "致电运营商："],
+    ["re:^outage: ", "断网："],
+    ["re:^modem-reboot: ", "调制解调器重启："],
+    ["re:^router-change: ", "路由器更换："],
+    ["re:^wiring: ", "线路/衰减变更："],
+    ["re:^power: ", "家中停电："],
+    ["re:^other: ", "其他："],
+    ["re:^Detail$", "详情"],
+    ["re:Timeouts logged by the modem", "调制解调器记录的超时"],
+    ["re: \\(latest (\\d+)\\)", "（最新 $1 条）"],
+    ["Modem log message", "调制解调器日志内容"],
+    ["How this was measured", "测量方法"],
+    ["re:The router polled the cable modem's status page every (\\d+) minutes, recording downstream and upstream signal levels, error counters and the modem's own event log, and pinged the internet each time\\.", "路由器每 $1 分钟轮询一次电缆调制解调器的状态页，记录下行和上行信号电平、错误计数器以及调制解调器自身的事件日志，并每次 ping 互联网。"],
+    ["Timeouts are counted from the modem's event log.", "超时统计来自调制解调器的事件日志。"],
+    ["re:Guidelines used: upstream power (\\S+)–(\\S+) dBmV, downstream power (\\S+) to \\+(\\S+) dBmV, SNR at least (\\S+) dB\\.", "使用的指导值：上行功率 $1–$2 dBmV，下行功率 $3 至 +$4 dBmV，SNR 不低于 $5 dB。"],
+    ["The full raw data (CSV) is available on request.", "完整原始数据（CSV）可应要求提供。"],
+    ["Generated by luci-app-modem-monitor.", "由 luci-app-modem-monitor 生成。"],
+    ["Click the letter to edit it before printing or copying.", "打印或复制前，可点击信件内容进行编辑。"],
+    ["Copy text", "复制文本"],
+    ["Copied", "已复制"],
+    ["Service credit request", "服务补偿申请"],
+    ["re:^(.+) Customer Service$", "$1 客服部"],
+    ["re:Dear (.+?) Customer Service,", "尊敬的 $1 客服部："],
+    ["re:Re: Request for a service credit, account (.+?) – (.+)", "回复：服务补偿申请（账号 $1）– $2"],
+    ["re:Re: Request for a service credit – (.+)", "回复：服务补偿申请 – $1"],
+    ["re:I am requesting a credit on my account for interruptions to my internet service during (.+?)\\.", "我申请对 $1 期间互联网服务中断给予账户补偿。"],
+    ["re:My router checks the connection and the cable modem every (\\d+) minutes and logs the results, and it recorded the following:", "我的路由器每 $1 分钟检查一次网络连接和电缆调制解调器并记录结果，记录内容如下："],
+    [", about ", "，约"],
+    ["re:(?<![#\\d])(\\d+) minutes", "$1 分钟"],
+    [" in total, when no traffic got through (listed below).", "，期间完全没有流量通过（列于下方）。"],
+    ["re:(\\d+) times? the modem lost its connection to your network and had to re-register or restart\\.", "$1 次调制解调器与贵方网络断开连接，不得不重新注册或重启。"],
+    ["re:(\\d+) short dropouts? of two seconds or more with no response from your network\\.", "$1 次两秒及以上、贵方网络完全无响应的短暂中断。"],
+    ["re:Measured service was affected on (\\d+) days?:", "经测量，服务受影响的天数为 $1 天："],
+    ["What was recorded", "记录内容"],
+    ["re:I also noted these interruptions myself, for times before my monitoring was running \\(from my notes and the modem's own log\\):", "以下中断发生在我的监控运行之前，由我本人记录（来自我的笔记和调制解调器自身日志）："],
+    ["re:These interruptions happened before my monitoring was running; I noted them myself \\(from my notes and the modem's own log\\):", "这些中断发生在我的监控运行之前，由我本人记录（来自我的笔记和调制解调器自身日志）："],
+    ["Interruptions caused by work I requested or carried out myself (technician visits, reboots, changes to my own equipment) or by power failures at my home are not included.", "由我要求或自行实施的工作（技术人员上门、重启、对自己设备的变更）或家中停电造成的中断未计入。"],
+    ["re:My monthly charge is \\$(\\S+)\\. Prorated for the measured time without service, that is \\$(\\S+); counting each affected day as a lost day of service, it is \\$(\\S+)\\. I am requesting a credit of", "我的月费为 $$$1。按测量的无服务时长比例折算为 $$$2；按每个受影响日计为一天服务损失则为 $$$3。我申请补偿"],
+    [" plus the days listed above", "，外加以上列出的天数"],
+    [", or the amount your outage credit policy provides if that is higher.", "，或按贵方断网补偿政策规定的金额（若更高）。"],
+    ["re:Please apply the credit your outage policy provides for these interruptions", "请按贵方断网政策为这些中断给予补偿"],
+    ["re: \\(my monthly charge is \\$(\\S+)\\)", "（我的月费为 $$$1）"],
+    ["The detailed logs are available on request.", "详细日志可应要求提供。"],
+    [" Reference: ", "参考："],
+    ["re:\\(No outages were recorded in (.+?), leaving out planned work\\. There is nothing to claim for this month\\.\\)", "（$1 未记录到断网，已排除计划内工作，本月没有可申请补偿的内容。）"],
+    ["Thank you,", "谢谢您，"],
+    ["re:(?<![A-Za-z])January (\\d{1,2}), (\\d{4})", "$2 年 1 月 $1 日"],
+    ["re:(?<![A-Za-z])February (\\d{1,2}), (\\d{4})", "$2 年 2 月 $1 日"],
+    ["re:(?<![A-Za-z])March (\\d{1,2}), (\\d{4})", "$2 年 3 月 $1 日"],
+    ["re:(?<![A-Za-z])April (\\d{1,2}), (\\d{4})", "$2 年 4 月 $1 日"],
+    ["re:(?<![A-Za-z])May (\\d{1,2}), (\\d{4})", "$2 年 5 月 $1 日"],
+    ["re:(?<![A-Za-z])June (\\d{1,2}), (\\d{4})", "$2 年 6 月 $1 日"],
+    ["re:(?<![A-Za-z])July (\\d{1,2}), (\\d{4})", "$2 年 7 月 $1 日"],
+    ["re:(?<![A-Za-z])August (\\d{1,2}), (\\d{4})", "$2 年 8 月 $1 日"],
+    ["re:(?<![A-Za-z])September (\\d{1,2}), (\\d{4})", "$2 年 9 月 $1 日"],
+    ["re:(?<![A-Za-z])October (\\d{1,2}), (\\d{4})", "$2 年 10 月 $1 日"],
+    ["re:(?<![A-Za-z])November (\\d{1,2}), (\\d{4})", "$2 年 11 月 $1 日"],
+    ["re:(?<![A-Za-z])December (\\d{1,2}), (\\d{4})", "$2 年 12 月 $1 日"],
+    ["re:(?<![A-Za-z])January (\\d{4})", "$1 年 1 月"],
+    ["re:(?<![A-Za-z])February (\\d{4})", "$1 年 2 月"],
+    ["re:(?<![A-Za-z])March (\\d{4})", "$1 年 3 月"],
+    ["re:(?<![A-Za-z])April (\\d{4})", "$1 年 4 月"],
+    ["re:(?<![A-Za-z])May (\\d{4})", "$1 年 5 月"],
+    ["re:(?<![A-Za-z])June (\\d{4})", "$1 年 6 月"],
+    ["re:(?<![A-Za-z])July (\\d{4})", "$1 年 7 月"],
+    ["re:(?<![A-Za-z])August (\\d{4})", "$1 年 8 月"],
+    ["re:(?<![A-Za-z])September (\\d{4})", "$1 年 9 月"],
+    ["re:(?<![A-Za-z])October (\\d{4})", "$1 年 10 月"],
+    ["re:(?<![A-Za-z])November (\\d{4})", "$1 年 11 月"],
+    ["re:(?<![A-Za-z])December (\\d{4})", "$1 年 12 月"],
+    ["re:Upstream power rose as the outdoor temperature rose \\(correlation (.+?) over (\\d+) hours, (.+?) to (.+?) (°[CF])\\)\\. Levels that track temperature point to a temperature-sensitive fault outdoors, such as a corroded or loose connector or damaged cable\\.", "上行功率随室外温度升高而上升（$2 小时内相关系数 $1，温度 $3 至 $4 $5）。功率随温度变化指向户外对温度敏感的故障，如接头腐蚀、松动或电缆受损。"],
+    ["re:Downstream power rose with temperature \\(correlation (.+?)\\)\\.", "下行功率随温度变化而上升（相关系数 $1）。"],
+    ["re:Upstream power fell as the outdoor temperature rose \\(correlation (.+?) over (\\d+) hours, (.+?) to (.+?) (°[CF])\\)\\. Levels that track temperature point to a temperature-sensitive fault outdoors, such as a corroded or loose connector or damaged cable\\.", "上行功率随室外温度升高而下降（$2 小时内相关系数 $1，温度 $3 至 $4 $5）。功率随温度变化指向户外对温度敏感的故障，如接头腐蚀、松动或电缆受损。"],
+    ["re:Downstream power fell with temperature \\(correlation (.+?)\\)\\.", "下行功率随温度变化而下降（相关系数 $1）。"],
+    ["re:During (\\d+) hours with precipitation the modem saw (\\S+) uncorrectables per hour, against (\\S+) in dry hours, which suggests water getting into the outdoor cabling or tap\\.", "在 $1 小时有降水期间，调制解调器每小时出现 $2 个不可纠错，而干燥时段为 $3 个，说明户外电缆或分支器可能进水。"],
+    ["re:(?<![#\\d])(\\d+) outages?(?![A-Za-z-])", "$1 次断网"],
+    ["re:(?<![#\\d])(\\d+) times?(?![A-Za-z-])", "$1 次"],
+    ["re:(?<![#\\d])(\\d+) minutes?(?![A-Za-z-])", "$1 分钟"],
+    ["re:(?<![#\\d])(\\d+) days?(?![A-Za-z-])", "$1 天"],
+    ["re:(?<![#\\d])(?<!of )(\\d+) samples?(?![A-Za-z-])", "$1 个采样"],
+    ["re:(?<![#\\d])(\\d+) traces?(?![A-Za-z-])", "$1 次跟踪"],
+    ["Findings", "分析结论"],
+    ["Day by day", "逐日数据"],
+                                    ["re:No new samples for (\\d+) minutes\\. Check that the modem-monitor service is running\\.", "已 $1 分钟没有新采样，请检查 modem-monitor 服务是否在运行。"],
+    ["re:No new samples for (\\d+) hours\\. Check that the modem-monitor service is running\\.", "已 $1 小时没有新采样，请检查 modem-monitor 服务是否在运行。"],
+    ["re:No new samples for (\\d+) days\\. Check that the modem-monitor service is running\\.", "已 $1 天没有新采样，请检查 modem-monitor 服务是否在运行。"],
+    ["Newest sample ", "最新采样 "],
+    ["report built ", "报告生成于 "],
+    ["re:, report rebuilt every (\\d+) min", "，每 $1 分钟重建报告"],
+    ["re:a sample every (\\d+) min", "每 $1 分钟采样"],
+    ["re: \\(modem unreachable: (.+)\\)(?= · report built)", "（调制解调器不可达：$1）"],
+    ["no modem password set (Status > Cable Modem > Settings)", "未设置调制解调器密码（状态 > 电缆调制解调器 > 设置）"],
+    ["login failed - check the modem password", "登录失败——请检查调制解调器密码"],
+    ["modem rejected login", "调制解调器拒绝登录"],
+    ["login failed earlier; waiting until ", "此前登录失败；等待至 "],
+    [" before retrying (avoids lockout)", " 后重试（避免锁定）"],
+    ["modem refused the status request after re-login", "重新登录后调制解调器拒绝了状态请求"],
+    ["re:(?<![#\\d])(\\d+) link drops?", "$1 次链路断开"],
+    ["of SQM cap where lower", "按 SQM 上限（取更低者）"],
+    ["re:^(\\d+) of (\\d+)$", "$2 次中 $1 次"],
+    ["re:^of (\\d+)$", "共 $1 次"],
+    ["re:^tests$", "测试"],
+    ["re:(?<![#\\d])(\\d+) failed(?![A-Za-z-])", "$1 次失败"],
+    ["No per-channel data yet.", "暂无按信道数据。"],
+    ["No maintenance entries yet.", "暂无维护记录。"],
+    ["No tests yet.", "暂无测试。"],
+    ["No data in this period.", "此时间段内暂无数据。"],
+    ["No event log entries", "暂无事件日志条目"],
+    ["No incidents recorded", "未记录到事件"],
+    ["No samples were recorded (monitor or router was off).", "未记录到采样（监控或路由器已关闭）。"],
+    ["re: of ([\\d,]+) on ([\\d.]+)–([\\d.]+) MHz \\(ch (.+?)\\)", "，占 $1 个错误，集中于 $2–$3 MHz（信道 $4）"],
+    ["re:No incidents recorded since the selected entry\\.", "自所选记录起未记录到事件。"],
+    ["re:^No incidents recorded\\.$", "未记录到事件。"],
+    ["re:No event log entries collected yet\\.", "暂未收集到事件日志条目。"],
+    ["re:No event log entries since the selected entry\\.", "自所选记录起暂无事件日志条目。"],
+    ["re:^tech \\(auto-detected\\)$", "技术人员上门（自动检测）"],
+    ["re:^isp-call \\(auto-detected\\)$", "致电运营商（自动检测）"],
+    ["re:^outage \\(auto-detected\\)$", "断网（自动检测）"],
+    ["re:^modem-reboot \\(auto-detected\\)$", "调制解调器重启（自动检测）"],
+    ["re:^router-change \\(auto-detected\\)$", "路由器更换（自动检测）"],
+    ["re:^wiring \\(auto-detected\\)$", "线路/衰减变更（自动检测）"],
+    ["re:^power \\(auto-detected\\)$", "家中停电（自动检测）"],
+    ["re:^other \\(auto-detected\\)$", "其他（自动检测）"],
+]
+
+
+
+def luci_ui_lang():
+    """Language configured in /etc/config/luci (option lang), normalized to
+    lowercase with dashes. Empty when unset or unreadable."""
+    try:
+        txt = open("/etc/config/luci").read()
+    except OSError:
+        return ""
+    m = re.search(r"option\s+lang\s+['\"]([^'\"]+)", txt)
+    return m.group(1).strip().lower().replace("_", "-") if m else ""
+
+
+def report_i18n_script():
+    """Script embedded in the generated report: translates visible text to
+    Simplified Chinese. The default follows the LuCI system language
+    (/etc/config/luci option lang): Chinese enables it, any other explicit
+    language disables it, and auto/unset falls back to the browser language.
+    ?lang=zh / ?lang=en override either way. The report is a self-contained static
+    page outside LuCI, so .lmo translations cannot reach it; instead the
+    translation table travels with the page and is applied to text nodes,
+    re-applied with a mutation observer because the range buttons re-render."""
+    import json as _json
+    def _litlen(p):
+        s = p[0]
+        if not s.startswith("re:"):
+            return len(s)
+        s = s[3:]
+        s = re.sub(r"\\u[0-9a-fA-F]{4}", "", s)  # \u00d7-style escapes
+        s = re.sub(r"\(\?<?[=!][^()]*\)", "", s)  # lookarounds consume no text
+        s = re.sub(r"\\.", "", s)                # \d \( \S ... escape pairs
+        s = re.sub(r"\[[^\]]*\]", "", s)        # character classes [...]
+        s = s.replace("(?:", "").replace("(", "").replace(")", "")  # keep group literals
+        s = re.sub(r"[\^$.*+?|{}]", "", s)        # remaining metacharacters
+        return len(s)
+    pairs = sorted(REPORT_I18N_ZH, key=lambda p: (-_litlen(p), -len(p[0])))
+    data = _json.dumps(pairs, ensure_ascii=False, separators=(",", ":"))
+    lang = luci_ui_lang()
+    default = "true" if lang.startswith("zh") else ("false" if lang and lang != "auto" else "null")
+    script = ("<script>(function(){var zh=/^zh/i.test((navigator.languages&&navigator.languages[0])||navigator.language||'');"
+            "var D=__DEF__;if(D!==null)zh=D;"
+            "var q=location.search;if(/[?&]lang=zh/.test(q))zh=true;if(/[?&]lang=en/.test(q))zh=false;if(!zh)return;"
+            "var P=" + data + ".map(function(p){var re;if(p[0].slice(0,3)==='re:')re=new RegExp(p[0].slice(3),'g');"
+            "else{var esc=p[0].replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&');"
+            "if(/^[A-Za-z]/.test(p[0]))esc='(?<![A-Za-z])'+esc;if(/[A-Za-z]$/.test(p[0]))esc=esc+'(?![A-Za-z])';re=new RegExp(esc,'g');}"
+            "return[re,p[1]];});"
+            "function tr(s){P.forEach(function(p){s=s.replace(p[0],p[1]);});return s;}"
+            "function node(n){if(n.nodeType===3)n.nodeValue=tr(n.nodeValue);}"
+            "function walk(root){var w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),n,list=[];"
+            "while(n=w.nextNode()){var p=n.parentNode;if(p&&p.nodeName!=='SCRIPT'&&p.nodeName!=='STYLE')list.push(n);}"
+            "list.forEach(node);"
+            "if(root.querySelectorAll)root.querySelectorAll('[title]').forEach(function(e){e.setAttribute('title',tr(e.getAttribute('title')));});}"
+            "var busy=false;function run(){if(busy)return;busy=true;try{document.title=tr(document.title);walk(document.body);}finally{busy=false;}}"
+            "run();"
+            "var mo=new MutationObserver(function(ms){if(busy)return;var go=false;ms.forEach(function(m){if(m.addedNodes.length||m.type==='characterData')go=true;});"
+            "if(go)setTimeout(run,50);});"
+            "mo.observe(document.body,{childList:true,subtree:true,characterData:true});"
+            "})();</script>")
+    return script.replace("__DEF__", default)
 
 
 HTML = r"""<!DOCTYPE html>
@@ -3812,6 +4348,8 @@ def credit_letter(cfg, ym):
     out = os.path.join(cfg["web_dir"], "credit.html")
     os.makedirs(cfg["web_dir"], exist_ok=True)
     page = CREDIT_HTML.replace("/*__DATA__*/null", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    if "</body>" in page:
+        page = page.replace("</body>", report_i18n_script() + "</body>", 1)
     with open(out + ".tmp", "w") as f:
         f.write(page)
     os.chmod(out + ".tmp", 0o644)
@@ -4393,6 +4931,8 @@ def complaint_summary(cfg, d_from, d_to, exclude_work=True):
     os.makedirs(cfg["web_dir"], exist_ok=True)
     out = os.path.join(cfg["web_dir"], "summary.html")
     page = SUMMARY_HTML.replace("/*__DATA__*/null", json.dumps(data, separators=(",", ":")).replace("</", "<\\/"))
+    if "</body>" in page:
+        page = page.replace("</body>", report_i18n_script() + "</body>", 1)
     with open(out + ".tmp", "w") as f:
         f.write(page)
     os.chmod(out + ".tmp", 0o644)
