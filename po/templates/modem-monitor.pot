@@ -1,0 +1,1824 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-modem-monitor\n"
+"POT-Creation-Date: 2026-11-27 12:00+0800\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:8
+msgid "Technician visit"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:9
+msgid "Call with ISP"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:10
+msgid "Outage"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:11
+msgid "Modem reboot"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:12
+msgid "Router change"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:13
+msgid "Wiring / attenuation change"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:14
+msgid "Power outage (home)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:15
+msgid "Other"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:39
+msgid "manual"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:40
+msgid "router"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:41
+msgid "automatic"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:42
+msgid "backfill"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:50
+#: root/www/luci-static/resources/view/modem-monitor/report.js:59
+msgid "Command failed"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:79
+msgid "What happened, e.g. \"Technician replaced the outside splitter and drop connector, job #12345\""
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:84
+msgid "Please describe what happened."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:98
+#, c-format
+msgid "%s now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:102
+msgid "Add an entry"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:104
+msgid "Quick:"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:105
+msgid "Internet down."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:106
+msgid "Power went out at home."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:107
+msgid "Called the ISP about the connection problem."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:108
+msgid "Changed wiring or attenuation."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:110
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:129
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:186
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:518
+msgid "When"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:110
+msgid "Defaults to now. Use the time the work started."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:111
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:130
+msgid "Ended"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:111
+msgid "Optional. Shown as a shaded span on the charts; the \"after\" comparison starts here."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:112
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:131
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:186
+msgid "Type"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:113
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:132
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:187
+msgid "What happened"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:115
+msgid "Add entry"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:117
+msgid "Clear"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:128
+#, c-format
+msgid "Edit entry from %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:130
+msgid "Leave empty for a single point in time."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:134
+#: root/www/luci-static/resources/view/modem-monitor/report.js:138
+#: root/www/luci-static/resources/view/modem-monitor/report.js:171
+#: root/www/luci-static/resources/view/modem-monitor/report.js:195
+msgid "Cancel"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:141
+msgid "Save"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:156
+msgid "Entries"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:156
+msgid "No entries yet."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:165
+#, c-format
+msgid "Stored ID %s (used by the modem-monitor maint-* commands)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:168
+msgid "suggested automatically"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:171
+msgid "Keep this automatic entry"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:172
+msgid "Confirm"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:173
+msgid "Edit"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:175
+#, c-format
+msgid "Delete entry #%s (%s)?"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:175
+msgid "Delete"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:181
+#, c-format
+msgid "Entries (%d)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:183
+#, c-format
+msgid "%d automatic suggestion to review. Confirm the one that is right, edit it to add detail, or delete false alarms."
+msgid_plural "%d automatic suggestions to review. Confirm the ones that are right, edit them to add detail, or delete false alarms."
+msgstr[0] ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:195
+#: root/www/luci-static/resources/view/modem-monitor/report.js:292
+#: root/usr/share/luci/menu.d/luci-app-modem-monitor.json
+msgid "Maintenance Log"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/maintenance.js:197
+msgid "Record technician visits, calls with your ISP, reboots and router changes. Each entry shows up as a numbered marker on the Signal Report charts with a 24-hour before/after comparison, and you can filter the report to show only data after any entry. Modem reboots, loss-of-signal events, level shifts and router reboots are suggested automatically."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:24
+msgid "No release notes."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:89
+msgid "Working… this can take up to a minute."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:93
+msgid "Done."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:98
+#, c-format
+msgid "Command failed: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:103
+msgid "Preparing download"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:103
+msgid "Packaging all data…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:110
+msgid "Export failed."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:117
+#, c-format
+msgid "Downloaded %s (%s). MAC and public IP addresses are masked."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:120
+#, c-format
+msgid "Export failed: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:130
+#: root/www/luci-static/resources/view/modem-monitor/report.js:141
+#: root/www/luci-static/resources/view/modem-monitor/report.js:318
+msgid "Complaint summary"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:131
+msgid "A one-page, printable summary for a date range: findings in plain language, day-by-day counts, repairs and calls from the maintenance log, outages and the timeouts the modem logged. Print it or save it as a PDF for your ISP or a regulator."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:133
+msgid "From"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:133
+msgid "To"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:136
+msgid "Leave out disruption caused by planned work (tech visits, reboots I started, router and wiring changes). The summary lists what was left out."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:141
+msgid "Building the summary…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:146
+msgid "Complaint summary ready"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:147
+#, c-format
+msgid "%s to %s. It opens in a new tab; use its \"Print / Save as PDF\" button."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:149
+#: root/www/luci-static/resources/view/modem-monitor/report.js:178
+#: root/www/luci-static/resources/view/modem-monitor/report.js:237
+#: root/www/luci-static/resources/view/modem-monitor/report.js:266
+msgid "Close"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:150
+msgid "Open summary"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:157
+msgid "Build summary"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:167
+msgid "Credit request letter"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:168
+msgid "Drafts a letter asking your ISP for a credit for the outages recorded in a month, leaving out planned work. Your name, account number, address and monthly price come from Settings → Outage credits. You can edit the letter before printing or copying it."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:169
+msgid "Month"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:175
+msgid "Credit letter ready"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:176
+msgid "Opens in a new tab. Click the text to edit it, then use Print / Save as PDF or Copy text."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:179
+msgid "Open letter"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:183
+msgid "Draft letter"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:190
+msgid "Optional: why (e.g. fresh baseline after tech visit)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:191
+msgid "Reboot the cable modem?"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:192
+msgid "Internet access drops for about 2 to 4 minutes while the modem restarts and re-registers. The reboot is recorded in the maintenance log with the exact time."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:199
+msgid "Rebooting modem"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:199
+msgid "Sending the reboot command…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:202
+#, c-format
+msgid "Reboot sent: %s. Samples will fail for a few minutes while the modem restarts."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:208
+#: root/www/luci-static/resources/view/modem-monitor/report.js:327
+msgid "Reboot modem"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:218
+#, c-format
+msgid "Update available: version %s (installed: %s)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:220
+msgid "What's new"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:221
+#: root/www/luci-static/resources/view/modem-monitor/report.js:240
+msgid "Install update"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:229
+#, c-format
+msgid "Version %s (installed: %s). This update includes %d releases; changes in each are listed below, newest first."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:230
+#, c-format
+msgid "Version %s (installed: %s)."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:232
+msgid "Open the release on GitHub"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:235
+msgid "The package is downloaded from GitHub, checked against the size and SHA-256 checksum GitHub publishes, then installed with the package manager. Your settings and data are kept. Monitoring pauses for a few seconds while the service restarts."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:238
+#, c-format
+msgid "Install %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:241
+#, c-format
+msgid "What's new since %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:241
+#, c-format
+msgid "What's new in %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:246
+msgid "Downloading…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:247
+#, c-format
+msgid "Installing version %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:248
+msgid "Downloading, verifying and installing. Please keep this page open; it takes about half a minute."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:249
+msgid "Show progress"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:252
+msgid "Update installed"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:252
+msgid "Update failed"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:254
+#, c-format
+msgid "Version %s is installed."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:255
+msgid "The update was not installed."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:257
+msgid "The download matched GitHub's published checksum and carried a valid project signature."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:257
+msgid "The download matched GitHub's published checksum."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:258
+msgid "Your settings and data are unchanged. Reload the page to use the new version; if a tab looks out of date, log out of LuCI and back in."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:259
+msgid "Nothing was changed if the download or signature check failed. The log below says why. You can also install manually from the release page."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:261
+msgid "Installation log"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:265
+msgid "Reload"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:282
+msgid "No result after 3 minutes; check System → Software or run: logread -e modem-monitor"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:294
+#, c-format
+msgid "%d automatic maintenance suggestion to review on the %s tab."
+msgid_plural "%d automatic maintenance suggestions to review on the %s tab."
+msgstr[0] ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:295
+#, c-format
+msgid "%d maintenance log entry. Add or edit it on the %s tab; the report can show only data after any entry (\"Show data since\")."
+msgid_plural "%d maintenance log entries. Add or edit them on the %s tab; the report can show only data after any entry (\"Show data since\")."
+msgstr[0] ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:305
+msgid "Taking a sample"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:306
+msgid "Take a sample now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:309
+msgid "Rebuilding report"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:310
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:170
+msgid "Rebuild report"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:314
+msgid "Download all data"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:322
+msgid "Credit letter"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:323
+msgid "Open in new tab"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:333
+msgid "Cable modem signal report"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:344
+msgid "No report yet. Set the modem password under Settings, then click \"Take a sample now\". The report fills in as samples accumulate (one every 5 minutes by default)."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:349
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:27
+#: root/usr/share/luci/menu.d/luci-app-modem-monitor.json
+msgid "Cable Modem"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/report.js:351
+msgid "Signal levels, error counters and event log from the cable modem, sampled by this router. Use \"Download all data\" or the CSV files at the bottom of the report as evidence for your ISP or a regulator."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:11
+#, c-format
+msgid "Version %s; version %s is available (see the Updates tab)."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:12
+#, c-format
+msgid "Version %s."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:12
+msgid "Up to date."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:17
+msgid "ISP gateway"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:19
+msgid "first hop past the gateway that answers pings"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:21
+msgid "no hop near you answers pings; using the first ping target"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:28
+#, c-format
+msgid "mtr (%d rounds) to %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:31
+#, c-format
+msgid "traceroute to %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:62
+msgid "Testing modem connection"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:63
+msgid "Logging in to the modem…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:67
+msgid "Modem connection test"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:73
+#, c-format
+msgid "Test failed to run: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:101
+msgid "Cable Modem Monitor"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:102
+msgid "Polls the cable modem (tested with the Arris SURFboard S33) for signal levels, error counters and its event log, and pings the internet, every few minutes. Save & Apply, then use \"Test connection\" on the Modem tab."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:104
+msgid "Modem"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:106
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:107
+msgid "Test connection"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:106
+msgid "Logs in to the modem with the saved settings and shows what it returns. Save & Apply first."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:111
+msgid "Enable monitoring"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:114
+msgid "ISP name"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:115
+msgid "Optional. Shown in the report title and text, e.g. \"Comcast\" or \"Spectrum\"."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:116
+msgid "your ISP"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:118
+msgid "Tile on Status → Overview"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:119
+msgid "Shows current levels and today's errors on the router's main status page."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:123
+msgid "Report title"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:124
+msgid "Optional. Replaces \"Cable modem signal report\"."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:127
+msgid "Report note"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:128
+msgid "Optional line shown under the report title, e.g. \"Account 12345 · Complaint 67890 · 123 Main St\"."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:131
+msgid "Modem type"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:132
+msgid "Auto-detect works for most modems. Tested: Arris S33. Also supported, from published page layouts (please report how it goes): S34, SB8200, SB6183, SB6190 and Netgear CM600 to CM3000. Rebooting from the router works on S33/S34 only; the Netgear event log isn't read yet."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:133
+msgid "Auto-detect"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:134
+msgid "Arris S33 / S34 (HNAP)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:135
+msgid "Arris SB8200 / SB6183 / SB6190 (HTML pages)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:136
+msgid "Netgear CM series"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:139
+msgid "Modem address"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:143
+msgid "Username"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:146
+msgid "Password"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:147
+msgid "The modem web UI password. On the S33 the default is usually the last 8 characters of the serial number on the label (case-sensitive), unless you changed it."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:151
+#, c-format
+msgid "%d hour"
+msgid_plural "%d hours"
+msgstr[0] ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:152
+#, c-format
+msgid "%d minute"
+msgid_plural "%d minutes"
+msgstr[0] ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:155
+msgid "Sample every"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:156
+msgid "How often the modem is read and the pings are run. Pick from the list or type a number of seconds (60 to 3600). Shorter catches brief problems in more detail; 5 minutes is plenty for a complaint record."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:158
+#, c-format
+msgid "%s (recommended)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:171
+msgid "How often the report page is refreshed with new samples. Samples are recorded either way. \"After every sample\" always follows the sample rate, even if you change it later. Or type a number of seconds, no shorter than the sample rate."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:172
+msgid "After every sample"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:173
+#, c-format
+msgid "Every %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:180
+#, c-format
+msgid "Can't be more often than the sample rate (%s). Choose \"After every sample\" or a longer interval."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:184
+msgid "How the router reaches the modem"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:185
+msgid "Host route (recommended): adds a route to the modem address over the WAN port and no extra address. Alias: adds a 192.168.100.x address to the WAN port (labelled <em>wan-device</em>:mm); DDNS clients set to read the WAN interface (ip_source=interface) can mistake it for your public IP. Off: you set up access yourself."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:186
+msgid "Host route (recommended)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:187
+msgid "Alias address on the WAN port"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:188
+msgid "Off"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:196
+msgid "Alias address"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:201
+msgid "Reboot: EEE setting to keep"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:202
+msgid "The modem's reboot command also re-sends its Energy-Efficient Ethernet and LED settings. They are read live from the modem first; these are only used if that read fails. Match what the modem's Configuration page shows."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:203
+msgid "0 (EEE off)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:204
+msgid "1 (EEE on)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:207
+msgid "Reboot: LED setting to keep"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:208
+msgid "1 (LEDs on)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:209
+msgid "0 (LEDs off)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:212
+msgid "Alerts"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:213
+msgid "Phone or email notifications when the line misbehaves. Turn alerts on under General, pick what to be told about, then fill in one or more services (ntfy is the easiest: free, no account). Alerts raised while the internet is down are sent once it is back."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:214
+msgid "General"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:215
+msgid "ntfy"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:216
+msgid "Pushover"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:217
+msgid "Telegram"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:218
+msgid "Webhook"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:219
+msgid "Email"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:220
+msgid "Daily summary"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:223
+msgid "Send alerts"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:226
+msgid "Alert on"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:227
+msgid "Modem unreachable / back online"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:228
+msgid "Modem rebooted on its own"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:229
+msgid "Modem re-registered (lost signal)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:230
+msgid "T3/T4 timeouts"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:231
+msgid "Uncorrectable error spike"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:232
+msgid "Upstream power above the guideline"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:233
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:76
+msgid "Packet loss"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:234
+msgid "Modem lost bonded channels"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:235
+msgid "Short dropouts (needs the 1-second probe)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:238
+msgid "T3/T4 timeouts within an hour"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:239
+msgid "Uncorrectables in one sample"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:240
+msgid "Packet loss in one sample (%)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:241
+msgid "Failed samples in a row before \"unreachable\""
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:242
+msgid "Short dropouts in one sample"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:243
+msgid "Repeat the same alert at most every (minutes)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:249
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:568
+msgid "Test"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:250
+msgid "Sends a test to every service that is filled in and shows which worked. Uses the saved settings, so Save & Apply first."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:251
+msgid "Send a test alert"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:256
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:388
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:703
+msgid "No answer."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:261
+msgid "Topic or URL"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:262
+msgid "Install the free <a href=\"https://ntfy.sh\" target=\"_blank\" rel=\"noopener\">ntfy</a> app and subscribe to a topic name. Enter the same name here (sent to ntfy.sh), or a full URL such as https://ntfy.example.com/modem for a self-hosted server. Anyone who knows a public topic name can read it, so pick something long and random."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:265
+msgid "Access token"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:265
+msgid "Only for protected topics."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:269
+msgid "User key"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:270
+msgid "From your <a href=\"https://pushover.net\" target=\"_blank\" rel=\"noopener\">Pushover</a> dashboard."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:271
+msgid "App token"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:272
+msgid "Create an application in Pushover and paste its API token."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:276
+msgid "Bot token"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:277
+msgid "Create a bot by messaging @BotFather in Telegram; it replies with the token."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:279
+msgid "Chat ID"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:280
+msgid "Send your bot a message, then open https://api.telegram.org/bot&lt;token&gt;/getUpdates and copy the number after \"chat\":{\"id\":"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:283
+msgid "Webhook URL"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:284
+msgid "Receives a JSON POST: {\"title\", \"message\", \"kind\", \"priority\", \"ts\", \"host\"}. Works with Home Assistant automations, n8n, Node-RED and similar."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:288
+msgid "Send to"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:289
+msgid "Needs a working sendmail on the router: install the msmtp package and set it up with your mail provider (for Gmail, use an app password)."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:291
+msgid "From address"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:291
+msgid "Optional."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:295
+msgid "Send a daily summary"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:296
+msgid "Each morning, one notification summarizing yesterday (timeouts, errors, levels, outages, dropouts), sent to the services on the other tabs. Quiet days are worth having on record too."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:299
+msgid "Send at"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:305
+msgid "Try it"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:306
+msgid "Send yesterday's summary now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:315
+msgid "Line quality"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:317
+msgid "1-second latency probe"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:318
+msgid "Sends one small ping per second (about 1 KB/s) to catch jitter and short dropouts of a few seconds that the regular samples miss. Shown on the report, in alerts, the daily summary and the complaint summary."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:321
+msgid "Probe target"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:322
+msgid "\"gateway\" = the ISP's first hop past the modem (recommended: it measures your cable segment). Or an address such as 1.1.1.1. Some ISP gateways answer pings at low priority, which can add occasional latency spikes of their own."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:326
+msgid "Seconds without reply that count as a dropout"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:331
+msgid "Watch for missing channels"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:332
+msgid "Flags samples where the modem holds fewer bonded channels than it did in the last 24 hours (partial service), on the report and in alerts."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:336
+msgid "Network & weather"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:338
+msgid "Ping the ISP gateway"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:339
+msgid "Also pings the first hop past the modem (the WAN default gateway). If it loses packets too, the problem is on the local cable segment rather than further out on the internet."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:343
+msgid "Gateway address"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:343
+msgid "Leave empty to use the WAN default gateway."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:345
+msgid "auto"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:348
+msgid "In use now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:352
+#, c-format
+msgid "ISP gateway: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:352
+msgid "not detected"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:354
+#, c-format
+msgid "1-second probe: %s (%s)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:355
+#, c-format
+msgid "tried: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:359
+msgid "Trace the path during packet loss"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:360
+msgid "Saves a path trace to the first ping target when packets are lost (at most every 15 minutes), shown on the report and summarized in the complaint summary. With the <code>mtr</code> package installed (<code>apk add mtr-json</code>, or <code>mtr-nojson</code>), MTR measures loss and latency at every hop over several rounds and shows where the loss starts; otherwise a plain traceroute is saved."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:364
+msgid "MTR rounds"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:364
+msgid "Probes per hop; each round takes about a second."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:368
+msgid "Path trace tool"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:371
+msgid "unknown"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:373
+#, c-format
+msgid "MTR is installed%s and is used for path traces."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:374
+msgid "MTR is not installed, so path traces use traceroute (no per-hop loss). Install it with <code>apk add mtr-json</code>, then reload this page."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:378
+#, c-format
+msgid "Traces the path to the first ping target now (takes about %d seconds) and saves it with the others on the report."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:379
+msgid "Run a path trace now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:382
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:403
+msgid "Path trace"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:382
+msgid "Tracing the path…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:390
+msgid "Hop"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:390
+msgid "Host"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:391
+msgid "Loss"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:391
+msgid "Sent"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:391
+msgid "Avg ms"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:391
+msgid "Worst ms"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:398
+#, c-format
+msgid "loss starts at hop %d (%s)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:398
+msgid "no loss reached the destination"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:407
+msgid "Weather: latitude"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:408
+msgid "Optional. Records outdoor temperature and precipitation from <a href=\"https://open-meteo.com\" target=\"_blank\" rel=\"noopener\">Open-Meteo</a> (free, no account) so the report can show whether levels or errors follow the weather. Two decimals (about 1 km) is plenty. Find yours by right-clicking a spot in Google Maps."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:412
+msgid "Weather: longitude"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:416
+msgid "Temperature unit"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:422
+msgid "No location set yet. Enter a latitude and longitude, then Save & Apply."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:425
+#, c-format
+msgid "precipitation %s %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:426
+#, c-format
+msgid "fetched %s; Open-Meteo observation %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:427
+msgid "No reading yet."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:428
+#, c-format
+msgid "Last attempt failed: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:431
+msgid "Latest reading"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:432
+msgid "Fetched with each sample, at most every 30 minutes. \"Fetch now\" uses the saved location, so Save & Apply after changing it."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:437
+msgid "Fetch now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:441
+msgid "Fetching…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:445
+msgid "No answer from the monitor."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:449
+msgid "Outage credits"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:450
+msgid "Totals outages per month on the report (leaving out planned work) and drafts a credit-request letter from the Cable Modem page."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:452
+msgid "Track outage credits"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:456
+msgid "Monthly price ($)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:456
+msgid "Optional. Used to estimate the credit."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:459
+msgid "Your name"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:461
+msgid "Account number"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:463
+msgid "Service address"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:467
+msgid "Speed tests"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:468
+msgid "Optional daily download and upload test from the router (default server: Cloudflare), with latency measured while idle and under load. Each test uses up to the data limit below in each direction, so mind any data cap. Traffic shaping (SQM) on the router caps the results."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:470
+msgid "Daily speed test"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:473
+msgid "Run at (hour)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:473
+msgid "A random minute within the hour is used."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:479
+msgid "Seconds per direction"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:484
+msgid "Data limit per direction (MB)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:485
+msgid "The test stops at this much data or at the time limit, whichever comes first. Unlimited uses only the time limit: at gigabit speed that is about 1.2 GB per direction for a 10-second test. Pick from the list or type a number."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:486
+msgid "Unlimited (time limit only)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:492
+msgid "Plan download (Mb/s)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:492
+msgid "Optional, in megabits per second (e.g. 1000 for a gigabit plan). Shown on the chart; the complaint summary counts tests below 80% of it."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:495
+msgid "Plan upload (Mb/s)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:495
+msgid "In megabits per second, e.g. 50."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:499
+msgid "Server"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:499
+msgid "Any server with Cloudflare-style /__down and /__up endpoints."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:505
+msgid "No results yet."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:507
+#, c-format
+msgid "Last run: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:507
+msgid "never"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:508
+msgid "a test is running now…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:509
+#, c-format
+msgid "next scheduled: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:509
+msgid "daily tests are off"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:519
+msgid "Down Mb/s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:519
+msgid "Up Mb/s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:519
+msgid "Latency idle / load (ms)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:520
+msgid "Data down / up (MB)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:522
+msgid "Recent results"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:527
+msgid "Run a speed test now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:542
+#, c-format
+msgid "Running: about %d seconds…"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:547
+msgid "Backup"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:548
+msgid "Copies the data files off the router once a night, so a failed SD card or USB drive doesn't take your history with it. Nothing is deleted at the destination."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:550
+msgid "Nightly backup"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:553
+msgid "Destination"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:554
+msgid "A mounted folder (for example a NAS share at /mnt/nas/modem-monitor), or <code>user@host:/path</code> over SSH. For SSH, install <code>rsync</code> (or <code>openssh-client</code>) and add this router's public key (<code>dropbearkey -y -f /root/.ssh/id_dropbear</code>) to the other machine's authorized_keys."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:558
+msgid "SSH key"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:558
+msgid "Only for user@host destinations."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:562
+msgid "Back up at"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:569
+msgid "Back up now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:574
+#, c-format
+msgid "%s (uses the saved settings)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:578
+msgid "Integrations"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:579
+msgid "<b>Prometheus:</b> scrape <code>http://&lt;router&gt;/modem-monitor/metrics.txt</code> (updated every sample). <b>Zabbix:</b> import <code>examples/zabbix/modem_monitor_by_http.yaml</code> from the GitHub repository and link it to the router host; it reads <code>/modem-monitor/latest.json</code>. <b>Home Assistant:</b> fill in MQTT below; sensors appear automatically through MQTT discovery."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:581
+msgid "Extra metrics file"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:582
+msgid "Optional: also write the Prometheus metrics to this path, for a node-exporter textfile collector."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:585
+msgid "MQTT broker"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:586
+msgid "Host name or IP. Needs the <code>mosquitto-client-ssl</code> (or <code>-nossl</code>) package. Leave empty to turn MQTT off. Alerts are also published to <em>topic</em>/alert."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:589
+msgid "MQTT port"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:592
+msgid "MQTT user"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:593
+msgid "MQTT password"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:595
+msgid "Use TLS"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:595
+msgid "Usually port 8883; needs mosquitto-client-ssl."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:596
+msgid "MQTT base topic"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:598
+msgid "Home Assistant discovery"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:602
+msgid "Storage & pings"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:604
+msgid "Data directory"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:605
+msgid "CSV history is kept here (a few MB per month). Chosen automatically on first install: the largest persistent mount with 512 MB or more free (/data, /mnt/*, /srv/*, /opt/*), otherwise /root. /tmp is lost on reboot."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:608
+msgid "Keep history (days)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:612
+msgid "Compress old months"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:613
+msgid "gzip monthly data files older than last month (about 10x smaller). Reports, summaries and exports read them as usual."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:617
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:632
+msgid "Full"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:617
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:632
+msgid "Lite"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:618
+msgid "Resource profile"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:619
+#, c-format
+msgid "How much memory the monitor uses to save time. <strong>Full</strong> keeps this month's and last month's data in memory, so a report rebuild only reads what is new: several times faster, using a few tens of MB more RAM. <strong>Lite</strong> keeps nothing between rebuilds and builds the report in a short-lived helper, so the always-running service stays small; rebuilds take longer. Every feature works the same and the reports are identical either way. Auto picks Full with at least %d MB of RAM and 2 CPU cores."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:620
+#, c-format
+msgid "Auto (%s on this router)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:620
+msgid "Auto"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:621
+msgid "Full: faster, uses more memory"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:622
+msgid "Lite: smaller, slower rebuilds"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:627
+msgid "This router"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:630
+#, c-format
+msgid "%s of RAM, %d CPU cores"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:631
+#, c-format
+msgid "detected profile: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:632
+#, c-format
+msgid "using: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:636
+msgid "CPU priority"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:637
+msgid "How the monitor (and the pings, path traces and speed tests it starts) shares the CPU with routing. Low means anything else on the router always goes first."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:638
+msgid "Normal"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:639
+msgid "Lower"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:640
+msgid "Low (recommended)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:641
+msgid "Lowest"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:644
+msgid "Run on CPU cores"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:645
+msgid "Optional. Keeps the monitor on these cores only, for example <code>2 3</code> on a 4-core router whose cores 0 and 1 handle network traffic (see which cores your network interrupts use in <code>/proc/interrupts</code>). Empty: any core. Takes effect when the service restarts (Save & Apply)."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:646
+msgid "any"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:649
+msgid "Core numbers separated by spaces, e.g. 2 3"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:652
+msgid "Modem-facing network port"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:653
+msgid "Error and link-drop counters are recorded for this port. Leave empty to use the device of the \"wan\" interface."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:654
+msgid "auto (wan interface)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:657
+msgid "Ping targets"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:657
+msgid "Space-separated."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:660
+msgid "Guideline ranges"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:661
+msgid "Shaded \"healthy\" bands on the charts. These are common DOCSIS 3.1 guidelines, not your ISP's official specs."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:663
+msgid "Upstream power min (dBmV)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:664
+msgid "Upstream power max (dBmV)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:665
+msgid "Downstream power min (dBmV)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:666
+msgid "Downstream power max (dBmV)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:667
+msgid "Downstream SNR min (dB)"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:673
+msgid "Updates"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:674
+msgid "Checks the GitHub repository for a newer release every 6 hours. When one exists, the Signal Report page offers to install it; nothing is installed without your click."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:676
+msgid "Version"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:682
+#, c-format
+msgid "version %s is available"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:682
+msgid "install it from the Signal Report page"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:684
+msgid "up to date"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:686
+#, c-format
+msgid "last checked %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:690
+msgid "Check for updates automatically"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:694
+msgid "GitHub repository"
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:694
+msgid "owner/name; change this if you use a fork."
+msgstr ""
+
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:697
+#: root/www/luci-static/resources/view/modem-monitor/settings.js:698
+msgid "Check now"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:41
+#, c-format
+msgid "%d s ago"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:41
+#, c-format
+msgid "%d min ago"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:41
+#, c-format
+msgid "%d h ago"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:63
+msgid "Downstream power"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:64
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:69
+#, c-format
+msgid "%s ch"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:64
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:69
+#, c-format
+msgid "guide %s…%s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:65
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:70
+#, c-format
+msgid "%s channels locked; guideline range %s to %s dBmV"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:66
+msgid "Downstream SNR"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:67
+msgid "lowest channel"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:67
+#, c-format
+msgid "min %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:68
+msgid "Upstream power"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:74
+msgid "Timeouts today"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:74
+#, c-format
+msgid "T3 %d · T4 %d"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:75
+msgid "Uncorrectables today"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:75
+msgid "damaged data"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:75
+msgid "Downstream codewords too damaged to repair, since midnight"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:77
+#, c-format
+msgid "ISP gateway %s%%"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:77
+msgid "last sample"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:82
+msgid "Speed test"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:83
+msgid "failed"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:84
+#, c-format
+msgid "%s→%s ms"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:86
+msgid "Download / upload; latency idle → under load"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:90
+msgid "Jitter / dropouts"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:91
+#, c-format
+msgid "%d short dropouts today"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:94
+msgid "Modem unreachable"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:95
+msgid "Online – channels missing"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:96
+msgid "Online – problems today"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:97
+msgid "Online"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:103
+#, c-format
+msgid "missing: %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:106
+#, c-format
+msgid "Last sample %s"
+msgstr ""
+
+#: root/www/luci-static/resources/view/status/include/70_modem_monitor.js:110
+msgid "Open the signal report"
+msgstr ""
+
+#: root/usr/share/luci/menu.d/luci-app-modem-monitor.json
+msgid "Signal Report"
+msgstr ""
+
+#: root/usr/share/luci/menu.d/luci-app-modem-monitor.json
+msgid "Settings"
+msgstr ""
+
+#: root/usr/share/rpcd/acl.d/luci-app-modem-monitor.json
+msgid "Grant access to the cable modem monitor"
+msgstr ""
+

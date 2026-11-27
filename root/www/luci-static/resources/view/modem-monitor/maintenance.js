@@ -35,6 +35,14 @@ function typeLabel(v) {
 	return v;
 }
 
+function sourceLabel(v) {
+	if (v === 'manual') return _('manual');
+	if (v === 'router') return _('router');
+	if (v === 'auto') return _('automatic');
+	if (v === 'backfill') return _('backfill');
+	return v;
+}
+
 function exec(args) {
 	return fs.exec(BIN, args).then(function(res) {
 		var out = ((res.stdout || '') + (res.stderr || '')).trim();
@@ -85,19 +93,19 @@ return view.extend({
 		var quick = function(t, text) {
 			return E('button', { 'class': 'btn cbi-button', 'click': function() {
 				type.value = t; when.value = dtValue(0); ended.value = '';
-				if (!note.value.trim()) note.value = text;
+				if (!note.value.trim()) note.value = text + ' ';
 				note.focus(); note.setSelectionRange(note.value.length, note.value.length);
-			} }, TYPES.filter(function(x) { return x[0] === t; })[0][1] + ' ' + _('now'));
+			} }, _('%s now').format(TYPES.filter(function(x) { return x[0] === t; })[0][1]));
 		};
 
 		return E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, _('Add an entry')),
 			E('div', { 'style': 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px' }, [
 				E('span', { 'style': 'opacity:.75' }, _('Quick:')),
-				quick('outage', _('Internet down. ')),
-				quick('power', _('Power went out at home. ')),
-				quick('isp-call', _('Called the ISP about ')),
-				quick('wiring', _('Changed '))
+				quick('outage', _('Internet down.')),
+				quick('power', _('Power went out at home.')),
+				quick('isp-call', _('Called the ISP about the connection problem.')),
+				quick('wiring', _('Changed wiring or attenuation.'))
 			]),
 			field(_('When'), when, _('Defaults to now. Use the time the work started.')),
 			field(_('Ended'), ended, _('Optional. Shown as a shaded span on the charts; the "after" comparison starts here.')),
@@ -157,7 +165,7 @@ return view.extend({
 				E('td', { 'class': 'td', 'style': 'white-space:nowrap', 'title': _('Stored ID %s (used by the modem-monitor maint-* commands)').format(m.id) }, '#' + num[m.id]),
 				E('td', { 'class': 'td', 'style': 'white-space:nowrap' }, m.time.slice(0, 16) + end),
 				E('td', { 'class': 'td', 'style': 'white-space:nowrap' }, [ typeLabel(m.type),
-					E('div', { 'style': 'font-size:11px;opacity:.7' }, sug ? _('suggested automatically') : m.source) ]),
+					E('div', { 'style': 'font-size:11px;opacity:.7' }, sug ? _('suggested automatically') : sourceLabel(m.source)) ]),
 				E('td', { 'class': 'td' }, m.note),
 				E('td', { 'class': 'td', 'style': 'white-space:nowrap;text-align:right' }, [
 					sug ? E('button', { 'class': 'btn cbi-button-positive', 'title': _('Keep this automatic entry'),
@@ -172,7 +180,7 @@ return view.extend({
 		return E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, _('Entries (%d)').format(entries.length)),
 			nsug ? E('div', { 'class': 'alert-message notice' },
-				_('%d automatic suggestion(s) to review. Confirm the ones that are right, edit them to add detail, or delete false alarms.').format(nsug)) : '',
+				N_(nsug, '%d automatic suggestion to review. Confirm the one that is right, edit it to add detail, or delete false alarms.', '%d automatic suggestions to review. Confirm the ones that are right, edit them to add detail, or delete false alarms.').format(nsug)) : '',
 			E('table', { 'class': 'table' }, [
 				E('tr', { 'class': 'tr table-titles' }, [
 					E('th', { 'class': 'th' }, '#'), E('th', { 'class': 'th' }, _('When')), E('th', { 'class': 'th' }, _('Type')),

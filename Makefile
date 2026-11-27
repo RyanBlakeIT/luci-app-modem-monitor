@@ -8,7 +8,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-modem-monitor
 PKG_VERSION:=1.9.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=RyanBlakeIT
 

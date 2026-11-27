@@ -12,6 +12,26 @@ function versionLine(ver, upd) {
 	return _('Version %s.').format(cur) + ((upd && upd.latest && !upd.error) ? ' ' + _('Up to date.') : '');
 }
 
+function probeWhyText(why) {
+	if (why === 'ISP gateway')
+		return _('ISP gateway');
+	if (why === 'first hop past the gateway that answers pings')
+		return _('first hop past the gateway that answers pings');
+	if (why === 'no hop near you answers pings; using the first ping target')
+		return _('no hop near you answers pings; using the first ping target');
+	return why;
+}
+
+function traceWhatText(what) {
+	var m = /^mtr \((\d+) rounds\) to (.+)$/.exec(what || '');
+	if (m)
+		return _('mtr (%d rounds) to %s').format(+m[1], m[2]);
+	m = /^traceroute to (.+)$/.exec(what || '');
+	if (m)
+		return _('traceroute to %s').format(m[1]);
+	return what;
+}
+
 /* One tab per settings section (all options live in one UCI section, so
    LuCI's own tabbed-map mode can't be used). The last tab is remembered. */
 function pageTabs(node) {
@@ -50,7 +70,7 @@ return view.extend({
 			]);
 		}).catch(function(e) {
 			ui.hideModal();
-			ui.addNotification(null, E('p', {}, _('Test failed to run: ') + e.message), 'danger');
+			ui.addNotification(null, E('p', {}, _('Test failed to run: %s').format(e.message)), 'danger');
 		});
 	},
 
@@ -135,7 +155,7 @@ return view.extend({
 		o = s.option(form.Value, 'interval', _('Sample every'),
 			_('How often the modem is read and the pings are run. Pick from the list or type a number of seconds (60 to 3600). Shorter catches brief problems in more detail; 5 minutes is plenty for a complaint record.'));
 		[ 60, 120, 300, 600, 900, 1800, 3600 ].forEach(function(v) {
-			o.value(String(v), secs(v) + (v == 300 ? ' ' + _('(recommended)') : ''));
+			o.value(String(v), v == 300 ? _('%s (recommended)').format(secs(v)) : secs(v));
 		});
 		o.datatype = 'range(60,3600)';
 		o.default = '300';
@@ -331,7 +351,7 @@ return view.extend({
 			var p = wx && wx.probe, parts = [];
 			parts.push(_('ISP gateway: %s').format(wx && wx.gateway ? '<code>' + wx.gateway + '</code>' : _('not detected')));
 			if (p && p.target)
-				parts.push(_('1-second probe: %s (%s)').format('<code>' + p.target + '</code>', p.why) +
+				parts.push(_('1-second probe: %s (%s)').format('<code>' + p.target + '</code>', probeWhyText(p.why)) +
 					(p.tried && p.tried.length ? ' <span style="opacity:.7">' + _('tried: %s').format(p.tried.join(', ')) + '</span>' : ''));
 			return parts.join('<br>');
 		};
@@ -375,7 +395,7 @@ return view.extend({
 								'%</td><td class="td">' + h.sent + '</td><td class="td">' + (h.avg == null ? '\u2013' : h.avg) + '</td><td class="td">' + (h.worst == null ? '\u2013' : h.worst) + '</td></tr>';
 						}).join('') + '</table>';
 					body = E('div', {}, [
-						E('p', {}, esc(r.what) + ' \u00b7 ' + (r.start ? _('loss starts at hop %d (%s)').format(r.start.hop, r.start.host) : _('no loss reached the destination'))),
+						E('p', {}, esc(traceWhatText(r.what)) + ' \u00b7 ' + (r.start ? _('loss starts at hop %d (%s)').format(r.start.hop, r.start.host) : _('no loss reached the destination'))),
 						E('div', { 'style': 'max-height:50vh;overflow:auto' }, [ (function() { var d = E('div'); d.innerHTML = html; return d; })() ])
 					]);
 				} else
@@ -551,7 +571,7 @@ return view.extend({
 		o.depends('backup_enabled', '1');
 		o.onclick = function() {
 			return fs.exec('/usr/bin/modem-monitor', [ 'backup' ]).then(function(res) {
-				ui.addNotification(null, E('p', {}, ((res.stdout || '') + (res.stderr || '')).trim() + ' ' + _('(uses the saved settings)')), res.code === 0 ? 'info' : 'warning');
+				ui.addNotification(null, E('p', {}, _('%s (uses the saved settings)').format(((res.stdout || '') + (res.stderr || '')).trim())), res.code === 0 ? 'info' : 'warning');
 			});
 		};
 
