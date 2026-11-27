@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.0
+- **Much faster report rebuilds, less memory.** With 30+ days of data, a rebuild used to re-read every data file and peak at about 200 MB of memory. Now:
+  - Downstream channel rows (most of the data) are reduced to their error counts as they are read, instead of being kept whole.
+  - On routers with plenty of memory, this month's and last month's data stay in memory between rebuilds, so a rebuild only reads the samples added since the last one: about 6–8× faster in testing (1.9 s → 0.25 s on 43 days of data), with peak memory down from about 200 MB to about 90 MB.
+  - Reports, summaries and alerts are unchanged: the new code was checked against the old on the same data, byte for byte.
+- **Resource profile (Settings → Storage & pings):** the monitor checks the router's RAM and CPU cores and picks **Full** (512 MB+ RAM, 2+ cores) or **Lite**. Lite builds the report in a short-lived helper process so the always-running service stays at about 20 MB, at the cost of slower rebuilds. Every feature works in both. You can override the choice; `modem-monitor resources` shows what was detected.
+- **Smaller install:** needs only `python3-light`, `python3-urllib` and `python3-openssl` instead of the full `python3`, which pulls in every Python add-on (databases, XML, curses and more). Every feature was tested with only those three installed. Note: when you update, the package manager may remove the full `python3` if nothing else on the router needs it. If you use Python for anything else, run `apk add python3` to keep it.
+- **Fixed:** data files are now always read oldest month first. Before, two months could be read out of order, which could add a false burst of uncorrectable errors at the start of a month in the report or the daily summary.
+
 ## 1.8.2
 - **Easier timing settings (Modem tab):** *Sample every* and *Rebuild report* are now drop-downs (1 minute to 1 hour) that still accept a typed number of seconds.
 - **Rebuild report → After every sample:** the report is rebuilt right after each sample and keeps following the sample rate if you change it later. The report is never rebuilt more often than samples are taken: Settings refuses a shorter interval, and the service treats one set by hand as after every sample.

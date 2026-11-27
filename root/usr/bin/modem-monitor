@@ -8,6 +8,7 @@ Commands:
   modem-monitor daemon   run forever (used by /etc/init.d/modem-monitor)
   modem-monitor poll     take one sample now
   modem-monitor report   rebuild the HTML report now
+  modem-monitor resources [--json]   resource profile in use (full or lite) and what was detected
   modem-monitor test     log in to the modem and print what it returns
   modem-monitor test --raw   same, plus the raw HNAP responses
   modem-monitor reboot-modem [--note "why"]   reboot the modem and log it
@@ -54,9 +55,36 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from datetime import datetime, timedelta
 
-VERSION = "1.8.2"
+
+def _ascii_idna_fallback():
+    """OpenWrt's python3-light has no unicodedata (it is in python3-codecs, about
+    1 MB), and without it Python can't look up any host name: socket and ssl
+    always run names through the "idna" codec. Host names here are plain ASCII,
+    for which IDNA encoding is the identity, so register an ASCII-only stand-in
+    when the real codec is missing. With python3-codecs installed this does nothing."""
+    import codecs
+    try:
+        codecs.lookup("idna")
+        return
+    except LookupError:
+        pass
+
+    def enc(s, errors="strict"):
+        return s.encode("ascii", errors).lower(), len(s)
+
+    def dec(b, errors="strict"):
+        return bytes(b).decode("ascii", errors), len(b)
+
+    info = codecs.CodecInfo(enc, dec, name="idna")
+    codecs.register(lambda name: info if name == "idna" else None)
+
+
+_ascii_idna_fallback()
+
+VERSION = "1.9.0"
 HNAP_NS = "http://purenetworks.com/HNAP1/"
 
 DEFAULTS = {
@@ -81,6 +109,7 @@ DEFAULTS = {
     "timeout": "15",
     "compress_old": "1",
     "nice": "10",               # CPU priority of the monitor (0 normal .. 19 lowest): routing comes first
+    "resource_profile": "auto",  # auto / full / lite: how much memory to trade for speed
     "cpu_affinity": "",         # optional cores to run on, e.g. "2 3" to stay off the networking cores
     "hires_ping": "0",          # 1 ping per second for jitter / short dropouts
     "hires_target": "gateway",  # "gateway" (ISP first hop) or an address
@@ -1734,26 +1763,247 @@ def write_latest(cfg, row):
 # Report
 # --------------------------------------------------------------------------
 
+# Data files are append-only CSVs, one per month (older months gzip-compressed).
+# Every reader goes through _file_rows(), which parses a file once and keeps only
+# what callers use: whole rows, except downstream channel rows, which are reduced
+# to their uncorrectable-codeword deltas (they are most of the data and nothing
+# else reads them). With the row cache on ("full" resource profile, see
+# resource_profile()) the parsed rows of this month's and last month's files stay
+# in memory and only lines appended since the last read are parsed; otherwise
+# each call streams the files and keeps nothing.
+
+ROWCACHE = None  # {path: _Parsed}; None = no caching
+
+
+class _Parsed(object):
+    __slots__ = ("sig", "off", "hdr", "rows", "stream", "firsts", "lasts", "info")
+
+    def __init__(self):
+        self.sig, self.off, self.hdr = None, 0, None
+        self.rows = []      # dict rows; for channels files (ts, ch, power) of "up" rows
+        self.stream = []    # channels: (ts, ch, delta) for downstream deltas > 0 within this file
+        self.firsts = {}    # channels: ch -> (ts, uncorr) of its first valid downstream row
+        self.lasts = {}     # channels: ch -> uncorr of its latest valid downstream row
+        self.info = {}      # channels: ch -> {"freq", "ofdm"} latest seen
+
+
+def _row_dict(hdr, row):
+    """Same dict csv.DictReader builds for a row."""
+    d = dict(zip(hdr, row))
+    lf, lr = len(hdr), len(row)
+    if lf < lr:
+        d[None] = row[lf:]
+    elif lf > lr:
+        for k in hdr[lr:]:
+            d[k] = None
+    return d
+
+
+def _consume(e, chans, lines, since=None):
+    rd = csv.reader(lines)
+    iv = {}  # share repeated values ("0", "", "Locked", ...) between rows
+    iv = iv.setdefault
+    if e.hdr is None:
+        for row in rd:
+            e.hdr = row
+            break
+        if e.hdr is None:
+            return
+    hdr = e.hdr
+    ix = {k: i for i, k in enumerate(hdr)}
+    if not chans:
+        its = ix.get("ts")
+        for row in rd:
+            if not row:
+                continue
+            if since is not None and its is not None and its < len(row):
+                try:
+                    if int(row[its]) < since:
+                        continue
+                except ValueError:
+                    continue
+            e.rows.append(_row_dict(hdr, [iv(v, v) if len(v) < 24 else v for v in row]))
+        return
+    idir = ix.get("dir")
+    for row in rd:
+        if not row:
+            continue
+        dr = row[idir] if idir is not None and idir < len(row) else None
+        if dr == "up":
+            r = _row_dict(hdr, row)
+            try:
+                ts = int(r["ts"])
+            except (KeyError, ValueError):
+                continue
+            if since is None or ts >= since:
+                e.rows.append((ts, iv(r["ch"], r["ch"]), fv(r, "power")))
+        elif dr == "down":
+            r = _row_dict(hdr, row)
+            try:
+                ts = int(r["ts"])
+                u = int(float(r.get("uncorr") or 0))
+            except (ValueError, KeyError, TypeError):
+                continue
+            ch = r.get("ch", "")
+            fr = num(r.get("freq_mhz"))
+            if fr:
+                e.info[ch] = {"freq": fr, "ofdm": _is_ofdm(r.get("mod"))}
+            pu = e.lasts.get(ch)
+            e.lasts[ch] = u
+            if pu is None:
+                if ch not in e.firsts:
+                    e.firsts[ch] = (ts, u)
+                continue
+            d = u - pu if u >= pu else u  # counters reset on reboot / re-registration
+            if d > 0:
+                e.stream.append((ts, ch, d))
+
+
+def _file_sig(p, st, f, off):
+    """Detects a file rewritten in place: inode plus samples of the bytes already parsed."""
+    head = tail = b""
+    if off:
+        f.seek(0)
+        head = f.read(min(off, 4096))
+        f.seek(max(0, off - 256))
+        tail = f.read(min(off, 256))
+    return (st.st_dev, st.st_ino, hashlib.md5(head + b"|" + tail).hexdigest())
+
+
+def _cacheable(p):
+    """This month's and last month's files, plus the non-monthly ones (events)."""
+    m = re.search(r"-(\d{4})-(\d{2})\.csv(\.gz)?$", p)
+    if not m:
+        return True
+    lt = time.localtime()
+    y, mo = (lt.tm_year, lt.tm_mon - 1) if lt.tm_mon > 1 else (lt.tm_year - 1, 12)
+    return "%s-%s" % (m.group(1), m.group(2)) >= "%04d-%02d" % (y, mo)
+
+
+def _file_rows(p, since=None):
+    """Parsed contents of one data file (see _Parsed), or None if unreadable.
+    Without the cache, rows older than since (when given) are skipped while parsing."""
+    chans = os.path.basename(p).startswith("channels-")
+    use = ROWCACHE is not None and _cacheable(p)
+    if use:
+        since = None
+    try:
+        st = os.stat(p)
+    except OSError:
+        if use:
+            ROWCACHE.pop(p, None)
+        return None
+    if p.endswith(".gz"):
+        e = ROWCACHE.get(p) if use else None
+        sig = (st.st_dev, st.st_ino, st.st_size, st.st_mtime)
+        if e is not None and e.sig == sig:
+            return e
+        e = _Parsed()
+        try:
+            with _topen(p) as f:
+                _consume(e, chans, f, since)
+        except (OSError, EOFError, zlib.error):
+            return None
+        e.sig = sig
+        if use:
+            ROWCACHE[p] = e
+        return e
+    e = ROWCACHE.get(p) if use else None
+    try:
+        with open(p, "rb") as f:
+            if e is not None and (st.st_size < e.off or _file_sig(p, st, f, e.off) != e.sig):
+                e = None  # rewritten: parse again from the start
+            if e is None:
+                e = _Parsed()
+            if st.st_size > e.off:
+                f.seek(e.off)
+                buf = f.read(st.st_size - e.off)
+                end = buf.rfind(b"\n") + 1  # a line still being written waits for the next read
+                if end:
+                    text = buf[:end].decode("utf-8", "replace")
+                    _consume(e, chans, text.splitlines(True), since)
+                    e.off += end
+            if use:
+                e.sig = _file_sig(p, st, f, e.off)
+    except OSError:
+        return None
+    if use:
+        ROWCACHE[p] = e
+    return e
+
+
+def rowcache_prune():
+    """Drop cached files that no longer exist or have aged out of the cached months."""
+    if ROWCACHE is None:
+        return
+    for p in list(ROWCACHE):
+        if not _cacheable(p) or not os.path.exists(p):
+            del ROWCACHE[p]
+
+
+def system_resources():
+    """RAM, CPU cores and free space where the data is kept."""
+    ram = 0
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    ram = int(line.split()[1]) // 1024
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = os.cpu_count() or 1
+    return {"ram_mb": ram, "cpus": cpus}
+
+
+FULL_MIN_RAM_MB = 512
+
+
+def resource_profile(cfg):
+    """("full" | "lite", detected, resources). Full keeps this and last month's
+    parsed data in memory, so a report rebuild only reads the newest lines
+    (roughly 5-10x faster, at the cost of tens of MB of RAM). Lite keeps nothing
+    between rebuilds and builds the report in a short-lived helper process, so
+    the always-running service stays small. Both produce identical reports."""
+    res = system_resources()
+    detected = "full" if res["ram_mb"] >= FULL_MIN_RAM_MB and res["cpus"] >= 2 else "lite"
+    want = (cfg.get("resource_profile") or "auto").strip().lower()
+    return (want if want in ("full", "lite") else detected), detected, res
+
+
+def up_power(cfg, since):
+    """Upstream channel power readings since a time: [(ts, ch, dBmV or None)], by time."""
+    rows = []
+    for p in files_since(cfg, "channels", since):
+        e = _file_rows(p, since)
+        if e is not None:
+            rows.extend(r for r in e.rows if r[0] >= since)
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
 def read_csvs(paths, since):
     rows = []
     for p in sorted(paths):
-        try:
-            with _topen(p) as f:
-                for r in csv.DictReader(f):
-                    try:
-                        if int(r["ts"]) >= since:
-                            rows.append(r)
-                    except (KeyError, ValueError):
-                        pass
-        except OSError:
-            pass
+        e = _file_rows(p, since)
+        if e is None:
+            continue
+        for r in e.rows:
+            try:
+                if int(r["ts"]) >= since:
+                    rows.append(dict(r) if ROWCACHE is not None else r)
+            except (KeyError, ValueError):
+                pass
     rows.sort(key=lambda r: int(r["ts"]))
     return rows
 
 
 def files_since(cfg, kind, since):
     first = time.strftime("%Y-%m", time.localtime(since))
-    return [p for p in glob.glob(os.path.join(cfg["data_dir"], kind + "-????-??.csv*"))
+    return [p for p in sorted(glob.glob(os.path.join(cfg["data_dir"], kind + "-????-??.csv*")))
             if re.search(r"(\d{4}-\d{2})\.csv(\.gz)?$", p) and
             re.search(r"(\d{4}-\d{2})\.csv(\.gz)?$", p).group(1) >= first]
 
@@ -1810,11 +2060,12 @@ def modem_down(r):
 
 
 def build_report(cfg):
+    rowcache_prune()
     now = int(time.time())
     longest = max(r[1] for r in RANGES)
     since = now - longest
     summ = read_csvs(files_since(cfg, "summary", since), since)
-    chans = [r for r in read_csvs(files_since(cfg, "channels", since), since) if r.get("dir") == "up"]
+    chans = up_power(cfg, since)
     events = read_csvs([os.path.join(cfg["data_dir"], "events.csv")], since)
     links = read_csvs(files_since(cfg, "link", since), since)
     interval = int(fnum(cfg, "interval"))
@@ -1825,7 +2076,7 @@ def build_report(cfg):
                            ("us_power_min", "us_power_max", "ds_power_min", "ds_power_max", "ds_snr_min")},
             "ranges": {}}
 
-    us_ids = sorted({r["ch"] for r in chans}, key=lambda x: (num(x) or 0, x))[:8]
+    us_ids = sorted({r[1] for r in chans}, key=lambda x: (num(x) or 0, x))[:8]
 
     mark_reboots(summ)  # derived from history so old rows are classified the same way
     # Link counters: recomputed from the cumulative columns. Cable/port errors and
@@ -1841,13 +2092,13 @@ def build_report(cfg):
     for name, span, bucket in RANGES:
         lo = now - span
         s = [r for r in summ if int(r["ts"]) >= lo]
-        c = [r for r in chans if int(r["ts"]) >= lo]
+        c = [r for r in chans if r[0] >= lo]
         ev = [e for e in events if int(e["ts"]) >= lo]
         lk = [r for r in links if int(r["ts"]) >= lo]
         b = bucket
         series = {
             "us_power": [{"name": "Ch %s" % ch, "pts": bucketize(
-                [(int(r["ts"]), fv(r, "power")) for r in c if r["ch"] == ch], b, "max")} for ch in us_ids],
+                [(r[0], r[2]) for r in c if r[1] == ch], b, "max")} for ch in us_ids],
             "ds_snr": [{"name": "Lowest channel", "pts": bucketize([(int(r["ts"]), fv(r, "ds_snr_min")) for r in s], b, "min")},
                        {"name": "Average", "pts": bucketize([(int(r["ts"]), fv(r, "ds_snr_avg")) for r in s], b, "avg")}],
             "ds_power": [{"name": "Highest channel", "pts": bucketize([(int(r["ts"]), fv(r, "ds_power_max")) for r in s], b, "max")},
@@ -2416,36 +2667,31 @@ def channel_uncorr(cfg, specs, hi=None, skip=None):
     lo_all = min(s[0] for s in specs.values())
     out = {n: {} for n in specs}
     info, prev = {}, {}
+
+    def add(t, ch, d):
+        if (hi is not None and t >= hi) or (skip and skip(t)):
+            return
+        for n, (lo, size) in specs.items():
+            if t >= lo:
+                b = _bstart(t, size)
+                m = out[n].setdefault(ch, {})
+                m[b] = m.get(b, 0) + d
+
     for p in files_since(cfg, "channels", lo_all - 86400):
-        try:
-            f = _topen(p)
-        except OSError:
+        e = _file_rows(p)
+        if e is None:
             continue
-        with f:
-            for r in csv.DictReader(f):
-                if r.get("dir") != "down":
-                    continue
-                try:
-                    t = int(r["ts"])
-                    u = int(float(r.get("uncorr") or 0))
-                except (ValueError, KeyError, TypeError):
-                    continue
-                ch = r.get("ch", "")
-                fr = num(r.get("freq_mhz"))
-                if fr:
-                    info[ch] = {"freq": fr, "ofdm": _is_ofdm(r.get("mod"))}
-                pu = prev.get(ch)
-                prev[ch] = u
-                if pu is None or (hi is not None and t >= hi) or (skip and skip(t)):
-                    continue
-                d = u - pu if u >= pu else u  # counters reset on reboot / re-registration
-                if d <= 0:
-                    continue
-                for n, (lo, size) in specs.items():
-                    if t >= lo:
-                        b = _bstart(t, size)
-                        m = out[n].setdefault(ch, {})
-                        m[b] = m.get(b, 0) + d
+        # a channel's first row in this file continues from its last row in the previous one
+        for ch, (t, u) in e.firsts.items():
+            pu = prev.get(ch)
+            if pu is not None:
+                d = u - pu if u >= pu else u
+                if d > 0:
+                    add(t, ch, d)
+        for t, ch, d in e.stream:
+            add(t, ch, d)
+        prev.update(e.lasts)
+        info.update(e.info)
     return out, info
 
 
@@ -4798,11 +5044,32 @@ def report_every(cfg):
     return interval if rep <= interval else rep
 
 
+def build_report_lite(cfg):
+    """Builds the report in a separate process so its memory is returned when it
+    finishes (lite profile). Falls back to building here if that fails to start."""
+    try:
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "report"],
+                           capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        log("report helper failed to run (%r); building in the service" % e)
+        return build_report(cfg)
+    if r.returncode != 0:
+        raise ModemError("report helper exited %d: %s" % (r.returncode, (r.stderr or "").strip()[-300:]))
+    return r.stdout.strip()
+
+
 def daemon(cfg):
+    global ROWCACHE
     cpu = set_cpu(cfg)
     interval = max(60, int(fnum(cfg, "interval")))
     rep_every = report_every(cfg)
-    log("started v%s, polling %s every %ds%s" % (VERSION, cfg["host"], interval, (" (%s)" % cpu) if cpu else ""))
+    prof, detected, res = resource_profile(cfg)
+    if prof == "full":
+        ROWCACHE = {}
+    log("started v%s, polling %s every %ds%s; %s resource profile (%s; %d MB RAM, %d cores)"
+        % (VERSION, cfg["host"], interval, (" (%s)" % cpu) if cpu else "", prof,
+           "detected" if prof == detected and (cfg.get("resource_profile") or "auto") == "auto" else "set in Settings",
+           res["ram_mb"], res["cpus"]))
     last_rep = 0
     last_prune = 0
     last_upd = time.time() - 6 * 3600 + 600  # first check ~10 min after start
@@ -4833,7 +5100,10 @@ def daemon(cfg):
         # used to slip to every other one by the few seconds a cycle takes).
         if t0 - last_rep >= rep_every - min(30, interval / 2):
             try:
-                build_report(cfg)
+                if prof == "full":
+                    build_report(cfg)
+                else:
+                    build_report_lite(cfg)
             except Exception as e:
                 log("report error: %r" % e)
             last_rep = t0
@@ -4929,6 +5199,13 @@ def main():
         print(p)
     elif cmd == "test":
         sys.exit(test(cfg, "--raw" in args))
+    elif cmd == "resources":
+        prof, detected, res = resource_profile(cfg)
+        out = dict(res, profile=prof, detected=detected, setting=cfg.get("resource_profile") or "auto",
+                   full_min_ram_mb=FULL_MIN_RAM_MB)
+        print(json.dumps(out) if "--json" in args else
+              "%s profile (%s); %d MB RAM, %d cores" % (prof, "auto-detected" if out["setting"] == "auto" else "set in Settings",
+                                                         res["ram_mb"], res["cpus"]))
     elif cmd == "trace":
         if "--status" in args:
             st_ = trace_status()

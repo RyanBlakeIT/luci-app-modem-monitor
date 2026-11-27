@@ -30,23 +30,28 @@ jobs:
           sleep 1
           printf 'host=127.0.0.1:18080\npassword=Secret123\ndata_dir=/tmp/mm-data\nweb_dir=/tmp/mm-www\nping_targets=127.0.0.1\nping_count=1\n' > /tmp/mm.conf
           export MODEM_MONITOR_CONF=/tmp/mm.conf
+          # run the monitor as on a router with only python3-light, -urllib and -openssl
+          export PYTHONPATH=$PWD/test/pylight
+          if python3 -c 'import logging' 2>/dev/null; then echo "python3-light simulation not active"; exit 1; fi
           python3 root/usr/bin/modem-monitor test
           python3 root/usr/bin/modem-monitor poll
           python3 root/usr/bin/modem-monitor poll
           curl -s http://127.0.0.1:18080/_ingress >/dev/null
           python3 root/usr/bin/modem-monitor poll
           python3 root/usr/bin/modem-monitor summary
+          python3 test/cache_equiv.py
+          python3 root/usr/bin/modem-monitor resources
           test -s /tmp/mm-www/summary.html
           grep -q '^modem_up 1' /tmp/mm-www/metrics.txt
           python3 root/usr/bin/modem-monitor credit
           test -s /tmp/mm-www/credit.html
           mkdir -p /tmp/mm-bk && printf 'backup_dest=/tmp/mm-bk\n' >> /tmp/mm.conf && python3 root/usr/bin/modem-monitor backup && ls /tmp/mm-bk/*.csv
-          python3 test/mock_speed.py 18300 & sleep 1
+          env -u PYTHONPATH python3 test/mock_speed.py 18300 & sleep 1
           printf 'speedtest_url=http://127.0.0.1:18300\nspeedtest_seconds=3\nhires_target=127.0.0.1\n' >> /tmp/mm.conf
           python3 root/usr/bin/modem-monitor speedtest --json | python3 -c "import json,sys; r=json.load(sys.stdin); assert r['down_mbps'] and r['up_mbps'], r"
           for k in sb8200:18101 sb8200login:18102 netgear:18103; do
             n=${k%%:*}; p=${k##*:}
-            python3 test/mock_html.py $p $n Secret1 &
+            env -u PYTHONPATH python3 test/mock_html.py $p $n Secret1 &
             sleep 1
             printf "host=127.0.0.1:$p\npassword=Secret1\ndata_dir=/tmp/h-$n/data\nweb_dir=/tmp/h-$n/www\nping_targets=127.0.0.1\nping_count=1\ntimeout=5\n" > /tmp/h-$n.conf
             MODEM_MONITOR_CONF=/tmp/h-$n.conf python3 root/usr/bin/modem-monitor test

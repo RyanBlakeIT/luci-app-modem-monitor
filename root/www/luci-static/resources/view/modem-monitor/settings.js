@@ -68,12 +68,15 @@ return view.extend({
 			}), null),
 			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'trace', '--status', '--json' ]).then(function(r) {
 				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
+			}), null),
+			L.resolveDefault(fs.exec('/usr/bin/modem-monitor', [ 'resources', '--json' ]).then(function(r) {
+				try { return JSON.parse(r.stdout || 'null'); } catch (e) { return null; }
 			}), null)
 		]);
 	},
 
 	render: function(data) {
-		var m, s, o, ver = data[0], upd = data[1], wx = data[2], sp = data[3], trs = data[4], self = this;
+		var m, s, o, ver = data[0], upd = data[1], wx = data[2], sp = data[3], trs = data[4], rsc = data[5], self = this;
 
 		m = new form.Map('modem_monitor', _('Cable Modem Monitor'),
 			_('Polls the cable modem (tested with the Arris SURFboard S33) for signal levels, error counters and its event log, and pings the internet, every few minutes. Save & Apply, then use "Test connection" on the Modem tab.') + ' ' + versionLine(ver, upd));
@@ -590,6 +593,25 @@ return view.extend({
 			_('gzip monthly data files older than last month (about 10x smaller). Reports, summaries and exports read them as usual.'));
 		o.default = '1';
 		o.rmempty = false;
+
+		var detected = rsc ? (rsc.detected == 'full' ? _('Full') : _('Lite')) : null;
+		o = s.option(form.ListValue, 'resource_profile', _('Resource profile'),
+			_('How much memory the monitor uses to save time. <strong>Full</strong> keeps this month\'s and last month\'s data in memory, so a report rebuild only reads what is new: several times faster, using a few tens of MB more RAM. <strong>Lite</strong> keeps nothing between rebuilds and builds the report in a short-lived helper, so the always-running service stays small; rebuilds take longer. Every feature works the same and the reports are identical either way. Auto picks Full with at least %d MB of RAM and 2 CPU cores.').format(rsc ? rsc.full_min_ram_mb : 512));
+		o.value('auto', detected ? _('Auto (%s on this router)').format(detected) : _('Auto'));
+		o.value('full', _('Full: faster, uses more memory'));
+		o.value('lite', _('Lite: smaller, slower rebuilds'));
+		o.default = 'auto';
+		o.rmempty = false;
+
+		if (rsc) {
+			o = s.option(form.DummyValue, '_resources', _('This router'));
+			o.rawhtml = true;
+			o.cfgvalue = function() {
+				return _('%s of RAM, %d CPU cores').format(rsc.ram_mb >= 1024 ? (rsc.ram_mb / 1024).toFixed(1) + ' GB' : rsc.ram_mb + ' MB', rsc.cpus) +
+					' \u00b7 ' + _('detected profile: %s').format(detected) +
+					(rsc.profile != rsc.detected ? ' \u00b7 ' + _('using: %s').format(rsc.profile == 'full' ? _('Full') : _('Lite')) : '');
+			};
+		}
 
 		o = s.option(form.ListValue, 'nice', _('CPU priority'),
 			_('How the monitor (and the pings, path traces and speed tests it starts) shares the CPU with routing. Low means anything else on the router always goes first.'));

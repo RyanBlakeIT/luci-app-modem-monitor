@@ -39,8 +39,9 @@ Every 5 minutes the router reads the modem's signal levels, error counters and e
 | Modem | Arris SURFboard S33 (hardware 1.0, firmware TB01.03.001.11) | Tested on the S33: HNAP JSON API, HTTPS/HTTP and HMAC-SHA256/MD5 auto-detected. |
 | Other modems | Built from published page layouts, not yet tested on hardware | **S34** (same HNAP API as the S33). **SB8200, SB6183, SB6190** (HTML status pages, including the SB8200 login). **Netgear CM600–CM3000** (`DocsisStatus.htm`; event log not read yet; newer firmware with a login form isn't supported). The type is auto-detected; set it under Settings if detection guesses wrong. Rebooting from the router works on S33/S34 only. Please open an issue with `modem-monitor test --raw` output for any model. |
 | OpenWrt | 25.12 (apk) | The `.apk` release targets OpenWrt 25.x. For 24.10 or older (opkg), build an `.ipk` with the SDK and the included `Makefile`. |
-| Packages | `python3`, `luci-base`, `rpcd-mod-file`, `ca-bundle` | `python3` needs about 15–20 MB. |
+| Packages | `python3-light`, `python3-urllib`, `python3-openssl`, `luci-base`, `rpcd-mod-file`, `ca-bundle` | Only the minimal Python and the two modules it needs (web requests and HTTPS), not the full `python3` with every add-on. |
 | Storage | — | About 2–4 MB of CSV per month. Use USB/SSD storage on routers with small flash. |
+| Memory | — | Adapts to the router (Settings → Storage & pings → Resource profile). **Full** (auto with 512 MB+ RAM and 2+ cores) keeps recent data in memory so rebuilds only read new samples. **Lite** keeps the service at about 20 MB and builds the report in a short-lived helper. Reports are identical either way. |
 
 ## Install
 
@@ -138,6 +139,7 @@ modem-monitor credit [--month YYYY-MM] [--json]   # credit-request letter / outa
 modem-monitor backup                        # copy the data off the router now
 modem-monitor speedtest [--background]      # run a speed test now
 modem-monitor trace [--status] [--json]     # run a path trace now (MTR if installed), or show which tool is used
+modem-monitor resources [--json]            # resource profile in use (full or lite) and what was detected
 modem-monitor digest [--day YYYY-MM-DD] [--send]   # the daily summary (default: yesterday)
 modem-monitor compress                      # gzip monthly files older than last month (also daily)
 modem-monitor export [--full]               # one .zip; --full keeps MAC/public IP addresses
